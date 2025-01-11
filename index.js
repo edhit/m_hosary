@@ -199,7 +199,7 @@ Object.keys(colors).forEach((colorAction) => {
         source: processedAudioPath,
         filename: `${currentArtist} - ${surahs[Number(currentTrack) - 1].name_en} - ${currentText}.mp3`,
       }, {
-        caption: `${colors[color]} Сура ${currentTrack} «${surahs[Number(currentTrack) - 1].name_en} (${surahs[Number(currentTrack) - 1].name_ru}), ${(currentText.indexOf("-")) ? "аяты" : "аят" } ${currentText}» Махмуд Аль-Хусари\n\n#коран ${toHashtag(surahs[Number(currentTrack) - 1].name_en}) \n\nОтправить?`,
+        caption: `${colors[color]} Сура ${currentTrack} «${surahs[Number(currentTrack) - 1].name_en} (${surahs[Number(currentTrack) - 1].name_ru}), ${(currentText.indexOf("-")) ? "аяты" : "аят" } ${currentText}» Махмуд Аль-Хусари\n\n#коран ${toHashtag(surahs[Number(currentTrack) - 1].name_en)} \n\nОтправить?`,
         ...Markup.inlineKeyboard([
             Markup.button.callback("✅ Отправить", "send_audio"),
             Markup.button.callback("❌ Отменить", "cancel_audio"),
@@ -216,7 +216,7 @@ bot.action("send_audio", async (ctx) => {
         source: processedAudioPath,
         filename: `${currentArtist} - ${surahs[Number(currentTrack) - 1].name_en} - ${currentText}.mp3`,
       }, {
-        caption: `${colors[color]} Сура ${currentTrack} «${surahs[Number(currentTrack) - 1].name_en} (${surahs[Number(currentTrack) - 1].name_ru}), ${(currentText.indexOf("-")) ? "аяты" : "аят" } ${currentText}» Махмуд Аль-Хусари\n\n#коран ${toHashtag(surahs[Number(currentTrack) - 1].name_en})`
+        caption: `${colors[color]} Сура ${currentTrack} «${surahs[Number(currentTrack) - 1].name_en} (${surahs[Number(currentTrack) - 1].name_ru}), ${(currentText.indexOf("-")) ? "аяты" : "аят" } ${currentText}» Махмуд Аль-Хусари\n\n#коран ${toHashtag(surahs[Number(currentTrack) - 1].name_en)}`
       });
       await ctx.deleteMessage();
       clearTempFolder(); // Очищаем временные файлы
