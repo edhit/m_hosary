@@ -15,16 +15,6 @@ const BOT_TOKEN = '7334946556:AAGHN1KRWM5yp8E3NGziDZUPAs5FbTKwyt4';
 const CHANNEL_ID = process.env.CHANNEL;
 const TEMP_FOLDER = "./temp";
 
-const colors = {
-  color_blue: "🔵",
-  color_green: "🟢",
-  color_red: "🔴",
-  color_yellow: "🟡",
-  color_purple: "🟣",
-  color_orange: "🟠",
-  color_darkred: "🟥",
-};
-
 // Инициализация бота
 const bot = new Telegraf(BOT_TOKEN);
 
