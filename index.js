@@ -181,13 +181,13 @@ Object.keys(colors).forEach((colorAction) => {
   bot.action(colorAction, async (ctx) => {
     color = colorAction
 
-    await ctx.editMessageText(`${colors[color]} Сура ${currentTrack} «${surahs[Number(currentTrack) - 1].name_en} (${surahs[Number(currentTrack) - 1].name_ru}), ${currentText}» Махмуд Аль-Хусари`)
+    await ctx.editMessageText(`${colors[color]} Сура ${currentTrack} «${surahs[Number(currentTrack) - 1].name_en} (${surahs[Number(currentTrack) - 1].name_ru}), ${(currentText.indexOf("-")) ? "аяты" : "аят" } ${currentText}» Махмуд Аль-Хусари`)
 
     await ctx.replyWithAudio({
         source: processedAudioPath,
         filename: `${currentArtist} - ${surahs[Number(currentTrack) - 1].name_en} - ${currentText}.mp3`,
       }, {
-        caption: `${colors[color]} Сура ${currentTrack} «${surahs[Number(currentTrack) - 1].name_en} (${surahs[Number(currentTrack) - 1].name_ru}), ${currentText}» Махмуд Аль-Хусари \n\n Отправить?`,
+        caption: `${colors[color]} Сура ${currentTrack} «${surahs[Number(currentTrack) - 1].name_en} (${surahs[Number(currentTrack) - 1].name_ru}), ${(currentText.indexOf("-")) ? "аяты" : "аят" } ${currentText}» Махмуд Аль-Хусари \n\n Отправить?`,
         ...Markup.inlineKeyboard([
             Markup.button.callback("✅ Отправить", "send_audio"),
             Markup.button.callback("❌ Отменить", "cancel_audio"),
@@ -204,7 +204,7 @@ bot.action("send_audio", async (ctx) => {
         source: processedAudioPath,
         filename: `${currentArtist} - ${surahs[Number(currentTrack) - 1].name_en} - ${currentText}.mp3`,
       }, {
-        caption: `${colors[color]} Сура ${currentTrack} «${surahs[Number(currentTrack) - 1].name_en} (${surahs[Number(currentTrack) - 1].name_ru}), ${currentText}» Махмуд Аль-Хусари`
+        caption: `${colors[color]} Сура ${currentTrack} «${surahs[Number(currentTrack) - 1].name_en} (${surahs[Number(currentTrack) - 1].name_ru}), ${(currentText.indexOf("-")) ? "аяты" : "аят" } ${currentText}» Махмуд Аль-Хусари`
       });
       await ctx.deleteMessage();
       clearTempFolder(); // Очищаем временные файлы
