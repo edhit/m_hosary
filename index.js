@@ -11,7 +11,7 @@ const surahs = require("./quran.json");
 // Установить путь для ffmpeg
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
+const BOT_TOKEN = '7334946556:AAGHN1KRWM5yp8E3NGziDZUPAs5FbTKwyt4';
 const CHANNEL_ID = process.env.CHANNEL;
 const TEMP_FOLDER = "./temp";
 
@@ -142,7 +142,7 @@ bot.action(/color_(.+)/, async (ctx) => {
     currentData.color = colorAction;
 
     const surahInfo = surahs[Number(currentData.track) - 1] || {}; // Получаем данные о суре
-    currentData.message = `${colorAction} Сура ${currentData.track} «${surahInfo.name_en} (${surahInfo.name_ru}), ${(currentData.text.includes("-")) ? "аяты" : "аят"} ${currentData.text}» - Махмуд Аль-Хусари`;
+    currentData.message = `${colorAction} Сура ${currentData.track} «${surahInfo.name_en} (${surahInfo.name_ru}), ${(currentData.text.includes("-")) ? "аяты" : "аят"} ${currentData.text}» - Махмуд Аль-Хусари\n\n#коран ${toHashtag(surahInfo.name_en)}`;
 
     await ctx.replyWithAudio(
       {
@@ -150,7 +150,7 @@ bot.action(/color_(.+)/, async (ctx) => {
         filename: `${currentData.artist} - ${surahInfo.name_en} - ${currentData.text}.mp3`,
       },
       {
-        caption: `${currentData.message}\n\n#коран ${toHashtag(surahInfo.name_en)}`,
+        caption: `${currentData.message}`,
         ...Markup.inlineKeyboard([
           Markup.button.callback("✅ Отправить", "send_audio"),
           Markup.button.callback("❌ Отменить", "cancel_audio"),
