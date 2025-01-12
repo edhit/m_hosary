@@ -11,7 +11,7 @@ const surahs = require("./quran.json");
 // Установить путь для ffmpeg
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-const BOT_TOKEN = '7334946556:AAGHN1KRWM5yp8E3NGziDZUPAs5FbTKwyt4';
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL;
 const TEMP_FOLDER = "./temp";
 
