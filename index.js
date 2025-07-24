@@ -12,8 +12,7 @@ const surahs = require("./quran.json");
 ffmpeg.setFfmpegPath(ffmpegPath);
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHANNEL_HUSSARY = process.env.CHANNEL_HUSSARY; // Канал для Хусари
-const CHANNEL_TARTEEL = process.env.CHANNEL_TARTEEL; // Канал для Тартиль
+const CHANNEL_ID = process.env.CHANNEL;
 const TEMP_FOLDER = "./temp";
 
 // Инициализация бота
@@ -278,10 +277,8 @@ bot.action(/color_(.+)/, async (ctx) => {
       {
         caption: `${currentData.message}`,
         ...Markup.inlineKeyboard([
-          [Markup.button.callback("📢 Хусари", "send_hussary")],
-          [Markup.button.callback("📢 Тартиль", "send_tarteel")],
-          [Markup.button.callback("📢 Оба канала", "send_both")],
-          [Markup.button.callback("❌ Отменить", "cancel_audio")],
+          Markup.button.callback("✅ Отправить", "send_audio"),
+          Markup.button.callback("❌ Отменить", "cancel_audio"),
         ]),
       }
     );
@@ -291,111 +288,13 @@ bot.action(/color_(.+)/, async (ctx) => {
   }
 });
 
-// Отправка в канал Хусари
-bot.action("send_hussary", async (ctx) => {
-  try {
-    await ctx.deleteMessage();
-    if (!currentData.audioPath) return ctx.reply("Нет аудиофайла для отправки!");
-
-    await bot.telegram.sendAudio(CHANNEL_HUSSARY, {
-      source: currentData.audioPath,
-      filename: path.basename(currentData.audioPath),
-    }, {
-      caption: `${currentData.message}`,
-    });
-
-    ctx.reply("Аудиофайл успешно отправлен в канал Хусари!");
-    clearTempFolder();
-    Object.assign(currentData, { 
-      track: "", 
-      text: "", 
-      color: "", 
-      audioPath: "", 
-      message: "",
-      title: "",
-      tags: {}
-    });
-  } catch (err) {
-    console.error("Ошибка отправки аудио:", err);
-    ctx.reply("Ошибка при отправке аудио.");
-  }
-});
-
-// Отправка в канал Тартиль
-bot.action("send_tarteel", async (ctx) => {
-  try {
-    await ctx.deleteMessage();
-    if (!currentData.audioPath) return ctx.reply("Нет аудиофайла для отправки!");
-
-    await bot.telegram.sendAudio(CHANNEL_TARTEEL, {
-      source: currentData.audioPath,
-      filename: path.basename(currentData.audioPath),
-    }, {
-      caption: `${currentData.message}`,
-    });
-
-    ctx.reply("Аудиофайл успешно отправлен в канал Тартиль!");
-    clearTempFolder();
-    Object.assign(currentData, { 
-      track: "", 
-      text: "", 
-      color: "", 
-      audioPath: "", 
-      message: "",
-      title: "",
-      tags: {}
-    });
-  } catch (err) {
-    console.error("Ошибка отправки аудио:", err);
-    ctx.reply("Ошибка при отправке аудио.");
-  }
-});
-
-// Отправка в оба канала
-bot.action("send_both", async (ctx) => {
-  try {
-    await ctx.deleteMessage();
-    if (!currentData.audioPath) return ctx.reply("Нет аудиофайла для отправки!");
-
-    await bot.telegram.sendAudio(CHANNEL_HUSSARY, {
-      source: currentData.audioPath,
-      filename: path.basename(currentData.audioPath),
-    }, {
-      caption: `${currentData.message}`,
-    });
-
-    await bot.telegram.sendAudio(CHANNEL_TARTEEL, {
-      source: currentData.audioPath,
-      filename: path.basename(currentData.audioPath),
-    }, {
-      caption: `${currentData.message}`,
-    });
-
-    ctx.reply("Аудиофайл успешно отправлен в оба канала!");
-    clearTempFolder();
-    Object.assign(currentData, { 
-      track: "", 
-      text: "", 
-      color: "", 
-      audioPath: "", 
-      message: "",
-      title: "",
-      tags: {}
-    });
-  } catch (err) {
-    console.error("Ошибка отправки аудио:", err);
-    ctx.reply("Ошибка при отправке аудио.");
-  }
-});
-
-// Отправка аудио (обычный режим)
+// Отправка аудио
 bot.action("send_audio", async (ctx) => {
   try {
     await ctx.deleteMessage();
     if (!currentData.audioPath) return ctx.reply("Нет аудиофайла для отправки!");
 
-    // В обычном режиме отправляем в канал по умолчанию (можно изменить)
-    await bot.telegram.sendAudio(CHANNEL_TARTEEL, {
+    await bot.telegram.sendAudio(CHANNEL_ID, {
       source: currentData.audioPath,
       filename: path.basename(currentData.audioPath),
     }, {
