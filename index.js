@@ -53,6 +53,23 @@ const currentData = {
   message: ""
 };
 
+// Мидлвар для проверки id пользователя
+bot.use(async (ctx, next) => {
+  try {
+    const allowedId = process.env.ALLOWED_USER_ID;
+    const userId = ctx.from?.id?.toString();
+
+    if (!allowedId || !userId || userId !== allowedId) {
+      await ctx.reply('⛔️ Доступ запрещён.');
+      return;
+    }
+    await next();
+  } catch (error) {
+    console.error('Ошибка в middleware проверки ID:', error);
+    await ctx.reply('⚠️ Ошибка проверки доступа.');
+  }
+});
+
 // Команды
 bot.command("surah", (ctx) => {
   const newTrack = ctx.message.text.replace("/surah", "").trim();
