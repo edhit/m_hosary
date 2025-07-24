@@ -60,7 +60,7 @@ bot.use(async (ctx, next) => {
     const userId = ctx.from?.id?.toString();
 
     if (!allowedId || !userId || userId !== allowedId) {
-      await ctx.reply('⛔️ Доступ запрещён.');
+      // await ctx.reply('⛔️ Доступ запрещён.');
       return;
     }
     await next();
