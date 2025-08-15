@@ -97,10 +97,19 @@ async function processAyahs(ayahNumbers) {
 async function mp3create(settings) {
   let ayahNumbers = [];
 
-  config.surah = settings.surah ? settings.surah : config.surah;
-  config.ayahs = settings.ayahs ? settings.ayahs : config.ayahs;
-  config.folder = settings.folder ? settings.folder : config.folder;
-  config.file = settings.file ? settings.file : config.file;
+  // config.mode = settings.mode ? settings.mode : config.mode;
+  // config.surah = settings.surah ? settings.surah : config.surah;
+  // config.ayahs = settings.ayahs ? settings.ayahs : config.ayahs;
+  // config.folder = settings.folder ? settings.folder : config.folder;
+  // config.file = settings.file ? settings.file : config.file;
+  
+  if (settings) {
+    Object.keys(config).forEach(key => {
+      if (settings[key] !== undefined) {
+        config[key] = settings[key];
+      }
+    });
+  }
   
   if (config.mode === 1) {
     ayahNumbers = config.ayahs;

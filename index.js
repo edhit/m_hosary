@@ -142,7 +142,7 @@ bot.on("text", async (ctx) => {
 
     const tempMsg = await ctx.reply("⏳ Обработка аудио...");
 
-    const settings = { ayahs, surah: parseInt(currentData.track), folder: TEMP_FOLDER };
+    const settings = { ayahs, surah: parseInt(currentData.track)};
     const outputAudio = await mp3create(settings);
     const outputAudioPath = path.join(outputAudio.folder, outputAudio.file);
 
@@ -151,20 +151,21 @@ bot.on("text", async (ctx) => {
       artist: currentData.artist,
       year: new Date().getFullYear(),
     };
-    NodeID3.write(tags, outputAudioPath, (err) => {
+
+    NodeID3.write(tags, outputAudioPath, async (err) => {
       if (err) {
-        return ctx.reply("Произошла ошибка при обработке аудио.");
+        return ctx.reply('Введите номер аятов еще раз')
       }
-    });
+    
+      currentData.audioPath = outputAudioPath;
+      await ctx.deleteMessage(tempMsg.message_id);
 
-    currentData.audioPath = outputAudioPath;
-    await ctx.deleteMessage(tempMsg.message_id);
-
-    await ctx.reply("Выберите цвет перед подтверждением:", {
-      ...Markup.inlineKeyboard([
-        ["🔵", "🟢", "🔴", "🟡"].map(e => Markup.button.callback(e, `color_${e}`)),
-        ["🟣", "🟠", "🟥"].map(e => Markup.button.callback(e, `color_${e}`)),
-      ])
+      await ctx.reply("Выберите цвет перед подтверждением:", {
+        ...Markup.inlineKeyboard([
+          ["🔵", "🟢", "🔴", "🟡"].map(e => Markup.button.callback(e, `color_${e}`)),
+          ["🟣", "🟠", "🟥"].map(e => Markup.button.callback(e, `color_${e}`)),
+        ])
+      });
     });
   } catch (err) {
     logger.error(`Text handler error: ${err.message}`);
