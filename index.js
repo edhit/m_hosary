@@ -222,7 +222,10 @@ bot.command("list_audio", (ctx) => {
   }
   let msg = "📝 <b>Последние аудиофайлы:</b>\n\n";
   data.slice(-10).forEach((item, idx) => {
-    msg += `<b>${idx + 1}.</b> <b>Сура:</b> ${item.surah}\n`;
+    const surahInfo = surahs[Number(item.surah) - 1] || {};
+    msg += `<b>${idx + 1}.</b> <b>Сура:</b> ${item.surah} — ${
+      surahInfo.name_ru || ""
+    } (${surahInfo.name_ar || ""})\n`;
     msg += `<b>Аяты:</b> ${item.ayahs.join(", ")}\n`;
     msg += `<b>Цвет:</b> ${item.color}\n`;
     msg += `<b>Дата:</b> ${new Date(item.timestamp).toLocaleString("ru-RU")}\n`;
