@@ -234,19 +234,23 @@ bot.command("list_audio", (ctx) => {
   ctx.reply(msg, { parse_mode: "HTML" });
 });
 
-// --- КОМАНДА ДЛЯ УДАЛЕНИЯ ЗАПИСИ ПО ИНДЕКСУ ---
+// --- КОМАНДА ДЛЯ УДАЛЕНИЯ ЗАПИСИ ПО ИНДЕКСУ (из последних 10) ---
 bot.command("delete_audio", (ctx) => {
   const args = ctx.message.text.split(" ").slice(1);
+  const data = getAudioData();
+  const last10 = data.slice(-10);
   const idx = parseInt(args[0], 10) - 1;
-  let data = getAudioData();
 
-  if (isNaN(idx) || idx < 0 || idx >= data.length) {
+  if (isNaN(idx) || idx < 0 || idx >= last10.length) {
     return ctx.reply("Некорректный номер записи.");
   }
 
-  const removed = data.splice(idx, 1);
+  // Находим реальный индекс в полном массиве
+  const realIdx = data.length - last10.length + idx;
+  data.splice(realIdx, 1);
+
   if (setAudioData(data)) {
-    ctx.reply(`Запись №${idx + 1} удалена.`);
+    ctx.reply(`Запись №${idx + 1} из последних 10 удалена.`);
   } else {
     ctx.reply("Ошибка при удалении записи.");
   }
