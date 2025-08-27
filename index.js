@@ -31,7 +31,7 @@ const logger = winston.createLogger({
   ),
   transports: [
     new winston.transports.Console(),
-    new winston.transports.File({ filename: "bot.log" })
+    new winston.transports.File({ filename: "bot.log" }),
   ],
 });
 
@@ -48,7 +48,7 @@ const currentData = {
   artist: "Mahmoud Al-Hosary",
   color: "",
   audioPath: "",
-  message: ""
+  message: "",
 };
 
 // --- УТИЛИТЫ ---
@@ -63,10 +63,11 @@ const parsePageRanges = (input) => {
       if (!trimmed) continue;
 
       if (trimmed.includes("-")) {
-        const [startStr, endStr] = trimmed.split("-").map(s => s.trim());
+        const [startStr, endStr] = trimmed.split("-").map((s) => s.trim());
         const start = parseInt(startStr, 10);
         const end = parseInt(endStr, 10);
-        if (isNaN(start) || isNaN(end) || start > end) throw new Error(`Invalid range: "${trimmed}"`);
+        if (isNaN(start) || isNaN(end) || start > end)
+          throw new Error(`Invalid range: "${trimmed}"`);
         for (let i = start; i <= end; i++) pages.add(i);
       } else {
         const page = parseInt(trimmed, 10);
@@ -83,17 +84,68 @@ const parsePageRanges = (input) => {
 };
 
 const toHashtag = (str) => {
-  return "#" + str.toLowerCase()
-    .replace(/[^a-zа-яё0-9\s]/gi, "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .join("#");
+  return (
+    "#" +
+    str
+      .toLowerCase()
+      .replace(/[^a-zа-яё0-9\s]/gi, "")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .join("#")
+  );
 };
 
 const clearTempFolder = () => {
-  fs.readdirSync(TEMP_FOLDER).forEach(file => fs.unlinkSync(path.join(TEMP_FOLDER, file)));
+  fs.readdirSync(TEMP_FOLDER).forEach((file) =>
+    fs.unlinkSync(path.join(TEMP_FOLDER, file))
+  );
 };
+
+// ...existing code...
+
+// --- УТИЛИТА ДЛЯ ЧТЕНИЯ audio_data.json ---
+function getAudioData() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) return [];
+    return JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"));
+  } catch (err) {
+    logger.error(`Ошибка чтения audio_data.json: ${err.message}`);
+    return [];
+  }
+}
+
+// --- УТИЛИТА ДЛЯ ЗАПИСИ audio_data.json ---
+function setAudioData(data) {
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf-8");
+    return true;
+  } catch (err) {
+    logger.error(`Ошибка записи audio_data.json: ${err.message}`);
+    return false;
+  }
+}
+
+// --- УТИЛИТА ДЛЯ ДОБАВЛЕНИЯ МЕТАДАННЫХ ---
+async function metaTags(tags, outputAudioPath, tempMsg, ctx) {
+  NodeID3.write(tags, outputAudioPath, async (err) => {
+    if (err) {
+      return false;
+    }
+
+    currentData.audioPath = outputAudioPath;
+    await ctx.deleteMessage(tempMsg.message_id);
+
+    await ctx.reply("Выберите цвет:", {
+      ...Markup.inlineKeyboard([
+        ["🔵", "🟢", "🔴", "🟡"].map((e) =>
+          Markup.button.callback(e, `color_${e}`)
+        ),
+        ["🟣", "🟠", "🟥"].map((e) => Markup.button.callback(e, `color_${e}`)),
+      ]),
+    });
+  });
+}
 
 // --- MIDDLEWARE ---
 bot.use(async (ctx, next) => {
@@ -109,20 +161,92 @@ bot.use(async (ctx, next) => {
 });
 
 // --- КОМАНДЫ ---
+bot.start((ctx) => {
+  ctx.reply(
+    "Добро пожаловать!\n\nИспользуйте /surah <номер> для выбора суры и отправьте номера аятов для создания аудио.\n\nИспользуйте /help для получения справки."
+  );
+});
+
+// --- КОМАНДА ПОМОЩИ ---
+bot.command("help", (ctx) => {
+  const helpMsg = `
+<b>Возможности бота:</b>
+
+<b>/start</b> — Приветствие и краткая инструкция.
+<b>/help</b> — Показать это справочное сообщение.
+<b>/surah &lt;номер&gt;</b> — Указать номер суры для создания аудио (например: /surah 5).
+<b>/clear_all</b> — Сбросить все текущие данные и очистить временные файлы.
+<b>/list_audio</b> — Показать список последних 10 аудиофайлов.
+<b>/delete_audio &lt;номер&gt;</b> — Удалить аудиозапись по номеру из списка (/list_audio).
+
+<b>Создание аудио:</b>
+1. Укажите суру командой <b>/surah &lt;номер&gt;</b>.
+2. Отправьте номера аятов (например: 1-5, 7, 10).
+3. Следуйте инструкциям для выбора цвета и отправки аудио.
+
+<b>Примечание:</b>
+Доступ к функциям бота ограничен для определённого пользователя.
+  `;
+  ctx.reply(helpMsg, { parse_mode: "HTML" });
+});
+
 bot.command("surah", (ctx) => {
   const newTrack = ctx.message.text.replace("/surah", "").trim();
   if (newTrack && !isNaN(newTrack)) {
     currentData.track = newTrack;
-    ctx.reply(`Номер суры обновлен на: "${newTrack}"`);
+    ctx.reply(`Сура обновлена: ${newTrack}`);
   } else {
-    ctx.reply("Укажите корректный номер суры, например: `/surah 5`", { parse_mode: "Markdown" });
+    ctx.reply("Пожалуйста, укажите номер суры, например: /surah 5", {
+      parse_mode: "Markdown",
+    });
   }
 });
 
 bot.command("clear_all", (ctx) => {
-  Object.assign(currentData, { track: "", text: "", color: "", audioPath: "", message: "" });
+  Object.assign(currentData, {
+    track: "",
+    text: "",
+    color: "",
+    audioPath: "",
+    message: "",
+  });
   clearTempFolder();
-  ctx.reply("Все данные успешно сброшены!");
+  ctx.reply("Данные сброшены.");
+});
+
+// --- КОМАНДА ДЛЯ ПРОСМОТРА СПИСКА АУДИО ---
+bot.command("list_audio", (ctx) => {
+  const data = getAudioData();
+  if (!data.length) {
+    return ctx.reply("Список аудиофайлов пуст.");
+  }
+  let msg = "📝 <b>Последние аудиофайлы:</b>\n\n";
+  data.slice(-10).forEach((item, idx) => {
+    msg += `<b>${idx + 1}.</b> <b>Сура:</b> ${item.surah}\n`;
+    msg += `<b>Аяты:</b> ${item.ayahs.join(", ")}\n`;
+    msg += `<b>Цвет:</b> ${item.color}\n`;
+    msg += `<b>Дата:</b> ${new Date(item.timestamp).toLocaleString("ru-RU")}\n`;
+    msg += "──────────────\n";
+  });
+  ctx.reply(msg, { parse_mode: "HTML" });
+});
+
+// --- КОМАНДА ДЛЯ УДАЛЕНИЯ ЗАПИСИ ПО ИНДЕКСУ ---
+bot.command("delete_audio", (ctx) => {
+  const args = ctx.message.text.split(" ").slice(1);
+  const idx = parseInt(args[0], 10) - 1;
+  let data = getAudioData();
+
+  if (isNaN(idx) || idx < 0 || idx >= data.length) {
+    return ctx.reply("Некорректный номер записи.");
+  }
+
+  const removed = data.splice(idx, 1);
+  if (setAudioData(data)) {
+    ctx.reply(`Запись №${idx + 1} удалена.`);
+  } else {
+    ctx.reply("Ошибка при удалении записи.");
+  }
 });
 
 // --- ОБРАБОТКА ТЕКСТА ---
@@ -133,43 +257,38 @@ bot.on("text", async (ctx) => {
 
     if (!currentData.track || !currentData.text) {
       return ctx.reply(
-        "Заполните все данные перед загрузкой файла:\n- Номер суры (`/surah`)\n- Номер аята (отправьте текст)"
+        "Пожалуйста, укажите номер суры (/surah) и номера аятов (отправьте текст)."
       );
     }
 
     const ayahs = parsePageRanges(currentData.text);
-    if (!ayahs || ayahs.includes(0)) return ctx.reply("Неверно указан(ы) номер(а) аятов");
+    if (!ayahs || ayahs.includes(0))
+      return ctx.reply("Некорректно указаны номера аятов.");
 
-    const tempMsg = await ctx.reply("⏳ Обработка аудио...");
+    const tempMsg = await ctx.reply("Обработка аудио...");
 
-    const settings = { ayahs, surah: parseInt(currentData.track)};
+    const settings = { ayahs, surah: parseInt(currentData.track) };
     const outputAudio = await mp3create(settings);
     const outputAudioPath = path.join(outputAudio.folder, outputAudio.file);
 
     const tags = {
-      title: `Surah ${currentData.track} ${surahs[Number(currentData.track) - 1]?.name_en || "Unknown"} (${currentData.text})`,
+      title: `Surah ${currentData.track} ${
+        surahs[Number(currentData.track) - 1]?.name_en || "Unknown"
+      } (${currentData.text})`,
       artist: currentData.artist,
       year: new Date().getFullYear(),
     };
 
-    NodeID3.write(tags, outputAudioPath, async (err) => {
-      if (err) {
-        return ctx.reply('Введите номер аятов еще раз')
-      }
-    
-      currentData.audioPath = outputAudioPath;
-      await ctx.deleteMessage(tempMsg.message_id);
-
-      await ctx.reply("Выберите цвет перед подтверждением:", {
-        ...Markup.inlineKeyboard([
-          ["🔵", "🟢", "🔴", "🟡"].map(e => Markup.button.callback(e, `color_${e}`)),
-          ["🟣", "🟠", "🟥"].map(e => Markup.button.callback(e, `color_${e}`)),
-        ])
-      });
-    });
+    let i = 0;
+    while (i < 3) {
+      if ((await metaTags(tags, outputAudioPath, tempMsg, ctx)) !== false)
+        break;
+      i++;
+      console.log(i);
+    }
   } catch (err) {
     logger.error(`Text handler error: ${err.message}`);
-    ctx.reply("Произошла ошибка при обработке аудио.");
+    ctx.reply("Ошибка при обработке аудио.");
     clearTempFolder();
   }
 });
@@ -181,22 +300,43 @@ bot.action(/color_(.+)/, async (ctx) => {
     const colorAction = ctx.match[1];
     currentData.color = colorAction;
 
+    // Проверка всех необходимых данных
+    if (
+      !currentData.audioPath ||
+      !currentData.track ||
+      !currentData.text ||
+      !currentData.artist
+    ) {
+      return ctx.reply(
+        "Недостаточно данных для отправки аудио. Пожалуйста, начните заново."
+      );
+    }
+
     const surahInfo = surahs[Number(currentData.track) - 1] || {};
-    currentData.message = `${colorAction} Сура ${currentData.track} «${surahInfo.name_en} (${surahInfo.name_ru}), ${(currentData.text.includes("-")) ? "аяты" : "аят"} ${currentData.text}» - Махмуд Аль-Хусари\n\n#коран ${toHashtag(surahInfo.name_en)}`;
+    currentData.message = `${colorAction} Сура ${currentData.track} «${
+      surahInfo.name_en
+    } (${surahInfo.name_ru}), ${
+      currentData.text.includes("-") ? "аяты" : "аят"
+    } ${currentData.text}» - Махмуд Аль-Хусари\n\n#коран ${toHashtag(
+      surahInfo.name_en
+    )}`;
 
     await ctx.replyWithAudio(
-      { source: currentData.audioPath, filename: `${currentData.artist} - ${surahInfo.name_en} - ${currentData.text}.mp3` },
+      {
+        source: currentData.audioPath,
+        filename: `${currentData.artist} - ${surahInfo.name_en} - ${currentData.text}.mp3`,
+      },
       {
         caption: currentData.message,
         ...Markup.inlineKeyboard([
           Markup.button.callback("✅ Отправить", "send_audio"),
-          Markup.button.callback("❌ Отменить", "cancel_audio"),
+          Markup.button.callback("❌ Отмена", "cancel_audio"),
         ]),
       }
     );
   } catch (err) {
     logger.error(`Color action error: ${err.message}`);
-    ctx.reply("Ошибка обработки цвета.");
+    ctx.reply("Ошибка при выборе цвета.");
   }
 });
 
@@ -204,14 +344,23 @@ bot.action(/color_(.+)/, async (ctx) => {
 bot.action("send_audio", async (ctx) => {
   try {
     await ctx.deleteMessage();
-    if (!currentData.audioPath) return ctx.reply("Нет аудиофайла для отправки!");
+    if (!currentData.audioPath) return ctx.reply("Аудиофайл не найден.");
 
-    const sentAudio = await bot.telegram.sendAudio(CHANNEL_ID, { source: currentData.audioPath, filename: path.basename(currentData.audioPath) }, { caption: currentData.message });
+    const sentAudio = await bot.telegram.sendAudio(
+      CHANNEL_ID || ctx.chat.id,
+      {
+        source: currentData.audioPath,
+        filename: path.basename(currentData.audioPath),
+      },
+      { caption: currentData.message }
+    );
     const file_id = sentAudio.audio.file_id;
 
     let allData = [];
     try {
-      allData = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE, "utf-8")) : [];
+      allData = fs.existsSync(DATA_FILE)
+        ? JSON.parse(fs.readFileSync(DATA_FILE, "utf-8"))
+        : [];
     } catch (err) {
       logger.error(`Error reading DATA_FILE: ${err.message}`);
     }
@@ -221,13 +370,19 @@ bot.action("send_audio", async (ctx) => {
       surah: currentData.track,
       ayahs: parsePageRanges(currentData.text),
       file_id,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
 
     fs.writeFileSync(DATA_FILE, JSON.stringify(allData, null, 2), "utf-8");
-    ctx.reply("Аудиофайл успешно отправлен и данные сохранены!");
+    ctx.reply("Аудиофайл отправлен и сохранён.");
     clearTempFolder();
-    Object.assign(currentData, { track: "", text: "", color: "", audioPath: "", message: "" });
+    Object.assign(currentData, {
+      track: "",
+      text: "",
+      color: "",
+      audioPath: "",
+      message: "",
+    });
   } catch (err) {
     logger.error(`Send audio error: ${err.message}`);
     ctx.reply("Ошибка при отправке аудио.");
@@ -236,15 +391,18 @@ bot.action("send_audio", async (ctx) => {
 
 bot.action("cancel_audio", async (ctx) => {
   await ctx.deleteMessage();
-  ctx.reply("Отправка аудио отменена.");
+  ctx.reply("Отправка отменена.");
   clearTempFolder();
   Object.assign(currentData, { audioPath: "", color: "", text: "", track: "" });
 });
 
+// ...existing code...
+
 // --- ЗАПУСК БОТА ---
-bot.launch()
+bot
+  .launch()
   .then(() => logger.info("Бот успешно запущен!"))
-  .catch(err => logger.error(`Bot launch error: ${err.message}`));
+  .catch((err) => logger.error(`Bot launch error: ${err.message}`));
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
