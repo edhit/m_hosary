@@ -9,6 +9,7 @@ const winston = require("winston");
 
 const surahs = require("./quran.json");
 const { mp3create } = require("./mp3create");
+const { getTafsir } = require("./tafsir");
 
 // Настройка ffmpeg
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -136,14 +137,26 @@ async function metaTags(tags, outputAudioPath, tempMsg, ctx) {
     currentData.audioPath = outputAudioPath;
     await ctx.deleteMessage(tempMsg.message_id);
 
-    await ctx.reply("Выберите цвет:", {
-      ...Markup.inlineKeyboard([
-        ["🔵", "🟢", "🔴", "🟡"].map((e) =>
-          Markup.button.callback(e, `color_${e}`)
-        ),
-        ["🟣", "🟠", "🟥"].map((e) => Markup.button.callback(e, `color_${e}`)),
-      ]),
-    });
+    await ctx.reply(
+      "Выберите цвет перед подтверждением:",
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback("🔵", "color_🔵"),
+          Markup.button.callback("🟢", "color_🟢"),
+          Markup.button.callback("🔴", "color_🔴"),
+          Markup.button.callback("🟡", "color_🟡"),
+        ],
+        [
+          Markup.button.callback("🟣", "color_🟣"),
+          Markup.button.callback("🟠", "color_🟠"),
+          Markup.button.callback("🟥", "color_🟥"),
+        ],
+        // Кнопка тафсира — добавляем только если один аят
+        ...(currentData.text && /^\d+$/.test(currentData.text.trim())
+          ? [[Markup.button.callback("📖 Показать тафсир", "show_tafsir")]]
+          : []),
+      ])
+    );
   });
 }
 
@@ -384,7 +397,7 @@ bot.action("send_audio", async (ctx) => {
     ctx.reply("Аудиофайл отправлен и сохранён.");
     clearTempFolder();
     Object.assign(currentData, {
-      track: "",
+      // track: "",
       text: "",
       color: "",
       audioPath: "",
@@ -393,6 +406,45 @@ bot.action("send_audio", async (ctx) => {
   } catch (err) {
     logger.error(`Send audio error: ${err.message}`);
     ctx.reply("Ошибка при отправке аудио.");
+  }
+});
+
+bot.action("show_tafsir", async (ctx) => {
+  try {
+    await ctx.answerCbQuery("Загружаю тафсир...");
+
+    const surah = parseInt(currentData.track);
+    const ayah = parseInt(currentData.text);
+
+    const surahInfo = surahs[Number(currentData.track) - 1] || {};
+
+    const tafsir = await getTafsir(surah, ayah);
+
+    if (!tafsir) {
+      return await ctx.editMessageText(
+        "⚠️ Тафсир не найден или произошла ошибка при загрузке."
+      );
+    }
+
+    const message = `
+📖 *Тафсир ас-Са’ди*  
+━━━━━━━━━━━━━━━  
+🕋 *Сура:* ${surah} ${surahInfo.name_ru}
+🔹 *Аят:* ${ayah}
+
+💬 *Толкование:*  
+_${tafsir}_
+
+━━━━━━━━━━━━━━━  
+🧠 Автор: *Абд ар-Рахман ибн Насир ас-Са’ди*  
+📚 Источник: *Tafsir as-Sa'di (ar-tafseer-al-saddi)*  
+🌐 Перевод: *Русский язык (ru-tafseer-al-saddi)*  
+    `;
+
+    await ctx.editMessageText(message, { parse_mode: "Markdown" });
+  } catch (err) {
+    console.error("Ошибка при показе тафсира:", err.message);
+    await ctx.reply("❌ Ошибка при загрузке тафсира. Попробуйте позже.");
   }
 });
 
