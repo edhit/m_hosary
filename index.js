@@ -503,9 +503,12 @@ _${tafsirParts[page]}_
 `;
 
     const keyboard = {
-      inline_keyboard: tafsirParts.map((_, i) => [
-        { text: `${i + 1}`, callback_data: `tafsir_page_${i}` },
-      ]),
+      inline_keyboard: [
+        tafsirParts.map((_, i) => ({
+          text: `${i + 1}`,
+          callback_data: `tafsir_page_${i}`,
+        })),
+      ],
     };
 
     await ctx.editMessageText(message, {
