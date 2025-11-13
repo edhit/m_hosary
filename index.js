@@ -469,13 +469,8 @@ bot.action("show_tafsir", async (ctx) => {
 🕋 *Сура:* ${surah} ${surahInfo.name_ru}
 🔹 *Аят:* ${ayah}
 
-💬 *Толкование:*  
+💬 *Толкование (стр. 1/${tafsirParts.length}):* 
 _${tafsirParts[0]}_
-
-━━━━━━━━━━━━━━━  
-🧠 Автор: *Абд ар-Рахман ибн Насир ас-Са’ди*  
-📚 Источник: *Tafsir as-Sa'di (ar-tafseer-al-saddi)*  
-🌐 Перевод: *Русский язык (ru-tafseer-al-saddi)*
 `;
 
     await ctx.editMessageText(message, {
@@ -508,11 +503,6 @@ bot.action(/tafsir_page_(\d+)/, async (ctx) => {
 
 💬 *Толкование (стр. ${page + 1}/${tafsirParts.length}):*  
 _${tafsirParts[page]}_
-
-━━━━━━━━━━━━━━━  
-🧠 Автор: *Абд ар-Рахман ибн Насир ас-Са’ди*  
-📚 Источник: *Tafsir as-Sa'di (ar-tafseer-al-saddi)*  
-🌐 Перевод: *Русский язык (ru-tafseer-al-saddi)*
 `;
 
     const keyboard = {
