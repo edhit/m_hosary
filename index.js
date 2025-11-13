@@ -21,6 +21,10 @@ const TEMP_FOLDER = path.resolve("./temp");
 const DATA_FILE = path.resolve("./audio_data.json");
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID;
 
+
+// Глобальное хранилище для текущего тафсира
+let tafsirParts = [];
+
 // Настройка логирования
 const logger = winston.createLogger({
   level: "info",
@@ -272,6 +276,8 @@ bot.command("delete_audio", (ctx) => {
 // --- ОБРАБОТКА ТЕКСТА ---
 bot.on("text", async (ctx) => {
   try {
+    tafsirParts = [];
+    
     const newText = ctx.message.text.trim();
     currentData.text = newText;
 
@@ -409,22 +415,40 @@ bot.action("send_audio", async (ctx) => {
   }
 });
 
+
 bot.action("show_tafsir", async (ctx) => {
   try {
     await ctx.answerCbQuery("Загружаю тафсир...");
 
     const surah = parseInt(currentData.track);
     const ayah = parseInt(currentData.text);
-
     const surahInfo = surahs[Number(currentData.track) - 1] || {};
 
-    const tafsir = await getTafsir(surah, ayah);
+    // Если тафсир еще не загружен — загружаем и делим
+    if (tafsirParts.length === 0) {
+      const tafsir = await getTafsir(surah, ayah);
 
-    if (!tafsir) {
-      return await ctx.editMessageText(
-        "⚠️ Тафсир не найден или произошла ошибка при загрузке."
-      );
+      if (!tafsir) {
+        return await ctx.editMessageText("⚠️ Тафсир не найден или произошла ошибка при загрузке.");
+      }
+
+      // Делим по 1024 символа
+      for (let i = 0; i < tafsir.length; i += 1024) {
+        let chunk = tafsir.slice(i, i + 1024);
+        if (i + 1024 < tafsir.length) chunk += "...";
+        tafsirParts.push(chunk);
+      }
     }
+
+    // Генерируем клавиатуру (1,2,3...)
+    const keyboard =
+      tafsirParts.length > 1
+        ? {
+            inline_keyboard: tafsirParts.map((_, i) => [
+              { text: `${i + 1}`, callback_data: `tafsir_page_${i}` },
+            ]),
+          }
+        : undefined;
 
     const message = `
 📖 *Тафсир ас-Са’ди*  
@@ -433,18 +457,66 @@ bot.action("show_tafsir", async (ctx) => {
 🔹 *Аят:* ${ayah}
 
 💬 *Толкование:*  
-_${tafsir}_
+_${tafsirParts[0]}_
 
 ━━━━━━━━━━━━━━━  
 🧠 Автор: *Абд ар-Рахман ибн Насир ас-Са’ди*  
 📚 Источник: *Tafsir as-Sa'di (ar-tafseer-al-saddi)*  
-🌐 Перевод: *Русский язык (ru-tafseer-al-saddi)*  
-    `;
+🌐 Перевод: *Русский язык (ru-tafseer-al-saddi)*
+`;
 
-    await ctx.editMessageText(message, { parse_mode: "Markdown" });
+    await ctx.editMessageText(message, {
+      parse_mode: "Markdown",
+      reply_markup: keyboard,
+    });
   } catch (err) {
     console.error("Ошибка при показе тафсира:", err.message);
     await ctx.reply("❌ Ошибка при загрузке тафсира. Попробуйте позже.");
+  }
+});
+
+// Обработка переключения страниц
+bot.action(/tafsir_page_(\d+)/, async (ctx) => {
+  try {
+    const page = parseInt(ctx.match[1]);
+    if (tafsirParts.length === 0) {
+      return await ctx.answerCbQuery("❌ Тафсир не загружен.");
+    }
+
+    const surah = parseInt(currentData.track);
+    const ayah = parseInt(currentData.text);
+    const surahInfo = surahs[Number(currentData.track) - 1] || {};
+
+    const message = `
+📖 *Тафсир ас-Са’ди*  
+━━━━━━━━━━━━━━━  
+🕋 *Сура:* ${surah} ${surahInfo.name_ru}
+🔹 *Аят:* ${ayah}
+
+💬 *Толкование (стр. ${page + 1}/${tafsirParts.length}):*  
+_${tafsirParts[page]}_
+
+━━━━━━━━━━━━━━━  
+🧠 Автор: *Абд ар-Рахман ибн Насир ас-Са’ди*  
+📚 Источник: *Tafsir as-Sa'di (ar-tafseer-al-saddi)*  
+🌐 Перевод: *Русский язык (ru-tafseer-al-saddi)*
+`;
+
+    const keyboard = {
+      inline_keyboard: tafsirParts.map((_, i) => [
+        { text: `${i + 1}`, callback_data: `tafsir_page_${i}` },
+      ]),
+    };
+
+    await ctx.editMessageText(message, {
+      parse_mode: "Markdown",
+      reply_markup: keyboard,
+    });
+
+    await ctx.answerCbQuery(`Страница ${page + 1}`);
+  } catch (err) {
+    console.error("Ошибка при переключении страниц:", err.message);
+    await ctx.answerCbQuery("❌ Ошибка при переключении страницы.");
   }
 });
 
