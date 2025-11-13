@@ -416,6 +416,8 @@ bot.action("send_audio", async (ctx) => {
 });
 
 
+
+
 bot.action("show_tafsir", async (ctx) => {
   try {
     await ctx.answerCbQuery("Загружаю тафсир...");
@@ -440,13 +442,16 @@ bot.action("show_tafsir", async (ctx) => {
       }
     }
 
-    // Генерируем клавиатуру (1,2,3...)
+    // 🔹 Генерируем клавиатуру в одну строку
     const keyboard =
       tafsirParts.length > 1
         ? {
-            inline_keyboard: tafsirParts.map((_, i) => [
-              { text: `${i + 1}`, callback_data: `tafsir_page_${i}` },
-            ]),
+            inline_keyboard: [
+              tafsirParts.map((_, i) => ({
+                text: `${i + 1}`,
+                callback_data: `tafsir_page_${i}`,
+              })),
+            ],
           }
         : undefined;
 
