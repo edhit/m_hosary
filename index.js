@@ -415,9 +415,6 @@ bot.action("send_audio", async (ctx) => {
   }
 });
 
-
-
-
 bot.action("show_tafsir", async (ctx) => {
   try {
     await ctx.answerCbQuery("Загружаю тафсир...");
@@ -434,15 +431,26 @@ bot.action("show_tafsir", async (ctx) => {
         return await ctx.editMessageText("⚠️ Тафсир не найден или произошла ошибка при загрузке.");
       }
 
-      // Делим по 1024 символа
-      for (let i = 0; i < tafsir.length; i += 1024) {
-        let chunk = tafsir.slice(i, i + 1024);
-        if (i + 1024 < tafsir.length) chunk += "...";
-        tafsirParts.push(chunk);
+      // 🔹 Разбиваем по словам, чтобы не обрывать их
+      const words = tafsir.split(" ");
+      let currentPart = "";
+      const maxLength = 1024;
+
+      for (const word of words) {
+        // +1 на пробел
+        if ((currentPart + " " + word).length > maxLength) {
+          // Добавляем многоточие, если не последняя часть
+          tafsirParts.push(currentPart.trim() + "...");
+          currentPart = word; // начинаем новую часть
+        } else {
+          currentPart += " " + word;
+        }
       }
+      // Добавляем последнюю часть
+      if (currentPart.trim()) tafsirParts.push(currentPart.trim());
     }
 
-    // 🔹 Генерируем клавиатуру в одну строку
+    // 🔹 Клавиатура в одну строку
     const keyboard =
       tafsirParts.length > 1
         ? {
