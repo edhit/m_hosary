@@ -10,6 +10,7 @@ const winston = require("winston");
 const surahs = require("./quran.json");
 const { mp3create } = require("./mp3create");
 const { getTafsir } = require("./tafsir");
+const { button } = require("telegraf/markup");
 
 // Настройка ffmpeg
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -61,6 +62,7 @@ function getUserData(userId) {
       message: "",
       tafsirParts: [], // Добавляем для тафсира
       currentTafsirPage: 0, // Добавляем для тафсира
+      button: null,
     });
   }
   return userSessions.get(userId);
@@ -139,39 +141,6 @@ function setAudioData(data) {
   }
 }
 
-// --- УТИЛИТА ДЛЯ ДОБАВЛЕНИЯ МЕТАДАННЫХ ---
-async function metaTags(tags, outputAudioPath, tempMsg, ctx, userData) {
-  NodeID3.write(tags, outputAudioPath, async (err) => {
-    if (err) {
-      return false;
-    }
-
-    userData.audioPath = outputAudioPath;
-    await ctx.deleteMessage(tempMsg.message_id);
-
-    await ctx.reply(
-      "Выберите цвет перед подтверждением:",
-      Markup.inlineKeyboard([
-        [
-          Markup.button.callback("🔵", "color_🔵"),
-          Markup.button.callback("🟢", "color_🟢"),
-          Markup.button.callback("🔴", "color_🔴"),
-          Markup.button.callback("🟡", "color_🟡"),
-        ],
-        [
-          Markup.button.callback("🟣", "color_🟣"),
-          Markup.button.callback("🟠", "color_🟠"),
-          Markup.button.callback("🟥", "color_🟥"),
-        ],
-        // Кнопка тафсира — добавляем только если один аят
-        ...(userData.text && /^\d+$/.test(userData.text.trim())
-          ? [[Markup.button.callback("📖 Показать тафсир", "show_tafsir")]]
-          : []),
-      ])
-    );
-  });
-}
-
 // --- MIDDLEWARE ДЛЯ ЛОГИРОВАНИЯ ---
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
@@ -191,6 +160,57 @@ function isAdmin(userId) {
   return ADMIN_USER_ID && userId.toString() === ADMIN_USER_ID;
 }
 
+function isAdmin(userId) {
+  return ADMIN_USER_ID && userId.toString() === ADMIN_USER_ID;
+}
+
+async function metaTags(tags, outputAudioPath, tempMsg, ctx, userData) {
+  NodeID3.write(tags, outputAudioPath, async (err) => {
+    if (err) {
+      return false;
+    }
+
+    userData.audioPath = outputAudioPath;
+    await ctx.deleteMessage(tempMsg.message_id);
+
+    if (isAdmin(ctx.from.id)) {
+      // Для администратора - показываем цвета и тафсир
+      await ctx.reply(
+        "Выберите цвет перед подтверждением:",
+        Markup.inlineKeyboard([
+          [
+            Markup.button.callback("🔵", "color_🔵"),
+            Markup.button.callback("🟢", "color_🟢"),
+            Markup.button.callback("🔴", "color_🔴"),
+            Markup.button.callback("🟡", "color_🟡"),
+          ],
+          [
+            Markup.button.callback("🟣", "color_🟣"),
+            Markup.button.callback("🟠", "color_🟠"),
+            Markup.button.callback("🟥", "color_🟥"),
+          ],
+          // Кнопка тафсира — добавляем только если один аят
+          ...(userData.text && /^\d+$/.test(userData.text.trim())
+            ? [[Markup.button.callback("📖 Показать тафсир", "show_tafsir")]]
+            : []),
+        ])
+      );
+    } else {
+      // Для обычного пользователя - показываем кнопку "Отправить выбранные аяты"
+      await ctx.reply(
+        "Аудио готово!",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("📤 Отправить выбранные аяты", "color_🔵")],
+          // Кнопка тафсира — добавляем только если один аят
+          ...(userData.text && /^\d+$/.test(userData.text.trim())
+            ? [[Markup.button.callback("📖 Показать тафсир", "show_tafsir")]]
+            : []),
+        ])
+      );
+    }
+  });
+}
+
 // --- КОМАНДЫ ---
 bot.start((ctx) => {
   ctx.reply(
@@ -201,7 +221,8 @@ bot.start((ctx) => {
       "Как использовать:\n" +
       "1. Выберите суру: /surah 1\n" +
       "2. Отправьте номера аятов: 1-5, 7, 10\n" +
-      "3. Выберите цвет и отправьте аудио"
+      "3. Выберите цвет и отправьте аудио",
+    Markup.keyboard([["📖 Выбрать суру"]]).resize()
   );
 });
 
@@ -213,15 +234,15 @@ bot.command("help", (ctx) => {
 <b>/start</b> — Приветствие и краткая инструкция.
 <b>/help</b> — Показать это справочное сообщение.
 <b>/surah &lt;номер&gt;</b> — Указать номер суры для создания аудио (например: /surah 5).
-<b>/colors</b> — Показать значение цветов.
-
 ${
   isAdmin(ctx.from.id)
     ? `
+
 <b>Команды администратора:</b>
 <b>/clear_all</b> — Сбросить все текущие данные и очистить временные файлы.
 <b>/list_audio</b> — Показать список последних 10 аудиофайлов.
 <b>/delete_audio &lt;номер&gt;</b> — Удалить аудиозапись по номеру из списка.
+<b>/colors</b> — Показать значение цветов.
 `
     : ""
 }
@@ -230,6 +251,7 @@ ${
 1. Укажите суру командой <b>/surah &lt;номер&gt;</b>.
 2. Отправьте номера аятов (например: 1-5, 7, 10).
 3. Следуйте инструкциям для выбора цвета.
+
 
 <b>Примечание:</b>
 Бот создаёт аудиофайлы из Корана в исполнении Махмуда Аль-Хусари.
@@ -242,7 +264,7 @@ bot.command("surah", (ctx) => {
   const newTrack = ctx.message.text.replace("/surah", "").trim();
   if (newTrack && !isNaN(newTrack)) {
     userData.track = newTrack;
-    ctx.reply(`Сура обновлена: ${newTrack}`);
+    ctx.reply(`Сура ${newTrack} выбрана. Теперь отправьте номера аятов.`);
   } else {
     ctx.reply("Пожалуйста, укажите номер суры, например: /surah 5");
   }
@@ -346,6 +368,26 @@ bot.on("text", async (ctx) => {
     userData.currentTafsirPage = 0;
 
     const newText = ctx.message.text.trim();
+
+    if (newText === "📖 Выбрать суру") {
+      userData.button = true;
+      return ctx.reply("Пожалуйста, введите номер суры");
+    }
+
+    if (userData.button) {
+      if (!isNaN(newText) && newText >= 1 && newText <= 114) {
+        userData.track = newText;
+        userData.button = null;
+        return ctx.reply(
+          `Сура ${newText} выбрана. Теперь отправьте номера аятов.`
+        );
+      } else {
+        return ctx.reply(
+          "Пожалуйста, введите корректный номер суры от 1 до 114."
+        );
+      }
+    }
+
     userData.text = newText;
 
     if (!userData.track || !userData.text) {
