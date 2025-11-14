@@ -21,7 +21,6 @@ const TEMP_FOLDER = path.resolve("./temp");
 const DATA_FILE = path.resolve("./audio_data.json");
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID;
 
-
 // Глобальное хранилище частей
 let tafsirParts = [];
 let currentTafsirPage = 0;
@@ -196,6 +195,7 @@ bot.command("help", (ctx) => {
 <b>/clear_all</b> — Сбросить все текущие данные и очистить временные файлы.
 <b>/list_audio</b> — Показать список последних 10 аудиофайлов.
 <b>/delete_audio &lt;номер&gt;</b> — Удалить аудиозапись по номеру из списка (/list_audio).
+<b>/color &lt;цвет&gt;</b> — Выбрать цвет для аудио (после создания).
 
 <b>Создание аудио:</b>
 1. Укажите суру командой <b>/surah &lt;номер&gt;</b>.
@@ -220,6 +220,23 @@ bot.command("surah", (ctx) => {
   }
 });
 
+// --- КОМАНДА ДЛЯ ПРОСМОТРА ЗНАЧЕНИЕ ЦВЕТОВ ---
+bot.command("colors", (ctx) => {
+  const colorsMsg = `
+Что означают цвета привыборе? 
+
+🔵 Аяты указывающие на могущество Всевышнего Аллаха
+🟢 Достоинства пророка и его атрибуты, Атрибуты верующих и их награда. Рай и его описание
+🔴 Аяты постановлений
+🟡 Рассказы пророков и их истории и чудеса, рассказы народов прошлого
+🟣 Священный Коран и его статус, атрибуты человек, отрицание Корана им и высокомерие человека, ответы на клевету и притензии многобожников 
+🟠 Судный день его знаки, предпосылки и предупреждение для людей от него 
+🟥 Геена и ее атрибуты, мучения многобожников и неверующих в ней
+  `;
+  ctx.reply(colorsMsg);
+});
+
+// --- КОМАНДА ДЛЯ СБРОСА ВСЕХ ДАННЫХ ---
 bot.command("clear_all", (ctx) => {
   Object.assign(currentData, {
     track: "",
@@ -279,7 +296,7 @@ bot.on("text", async (ctx) => {
   try {
     tafsirParts = [];
     currentTafsirPage = 0;
-    
+
     const newText = ctx.message.text.trim();
     currentData.text = newText;
 
@@ -417,8 +434,6 @@ bot.action("send_audio", async (ctx) => {
   }
 });
 
-
-
 bot.action("show_tafsir", async (ctx) => {
   try {
     await ctx.answerCbQuery("Загружаю тафсир...");
@@ -454,13 +469,14 @@ bot.action("show_tafsir", async (ctx) => {
     if (current.trim()) tafsirParts.push(current.trim());
 
     // Формируем клавиатуру (если больше одной части)
-    const keyboard = tafsirParts.length > 1
-      ? {
-          inline_keyboard: [
-            [{ text: "Показать ещё", callback_data: "tafsir_next" }]
-          ]
-        }
-      : undefined;
+    const keyboard =
+      tafsirParts.length > 1
+        ? {
+            inline_keyboard: [
+              [{ text: "Показать ещё", callback_data: "tafsir_next" }],
+            ],
+          }
+        : undefined;
 
     const message = `
 📖 *Тафсир ас-Са’ди*
@@ -476,7 +492,6 @@ _${tafsirParts[0]}_
       parse_mode: "Markdown",
       reply_markup: keyboard,
     });
-
   } catch (err) {
     console.error(err);
     await ctx.reply("Ошибка при загрузке. Попробуйте позже.");
@@ -500,8 +515,8 @@ bot.action("tafsir_next", async (ctx) => {
     const keyboard = hasMore
       ? {
           inline_keyboard: [
-            [{ text: "Показать ещё", callback_data: "tafsir_next" }]
-          ]
+            [{ text: "Показать ещё", callback_data: "tafsir_next" }],
+          ],
         }
       : undefined;
 
@@ -516,7 +531,6 @@ bot.action("tafsir_next", async (ctx) => {
       parse_mode: "Markdown",
       reply_markup: keyboard,
     });
-
   } catch (err) {
     console.error(err);
     ctx.answerCbQuery("Ошибка.");
