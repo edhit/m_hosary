@@ -490,10 +490,14 @@ bot.action("tafsir_next", async (ctx) => {
   try {
     await ctx.answerCbQuery();
 
+    // 1️⃣ Удаляем клавиатуру у старого сообщения
+    await ctx.editMessageReplyMarkup();
+
     currentTafsirPage++;
 
-    // Если частей больше нет — убираем кнопку
-    const keyboard = currentTafsirPage < tafsirParts.length - 1
+    const hasMore = currentTafsirPage < tafsirParts.length - 1;
+
+    const keyboard = hasMore
       ? {
           inline_keyboard: [
             [{ text: "Показать ещё", callback_data: "tafsir_next" }]
@@ -501,23 +505,15 @@ bot.action("tafsir_next", async (ctx) => {
         }
       : undefined;
 
-    const surah = parseInt(currentData.track);
-    const ayah = parseInt(currentData.text);
-    const surahInfo = surahs[Number(currentData.track) - 1] || {};
-
     const message = `
-📖 *Тафсир ас-Са’ди*
+📖 *Продолжение тафсира*
 ━━━━━━━━━━━━━━━
-🕋 *Сура:* ${surah} ${surahInfo.name_ru}
-🔹 *Аят:* ${ayah}
-
-💬 *Продолжение:*
 _${tafsirParts[currentTafsirPage]}_
 
-━━━━━━━━━━━━━━━
 Страница: *${currentTafsirPage + 1}/${tafsirParts.length}*
 `;
 
+    // 2️⃣ Новую часть отправляем через ctx.reply
     await ctx.reply(message, {
       parse_mode: "Markdown",
       reply_markup: keyboard,
@@ -525,7 +521,7 @@ _${tafsirParts[currentTafsirPage]}_
 
   } catch (err) {
     console.error(err);
-    await ctx.answerCbQuery("Ошибка.");
+    ctx.answerCbQuery("Ошибка.");
   }
 });
 
