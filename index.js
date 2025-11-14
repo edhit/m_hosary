@@ -518,7 +518,7 @@ _${tafsirParts[currentTafsirPage]}_
 Страница: *${currentTafsirPage + 1}/${tafsirParts.length}*
 `;
 
-    await ctx.editMessageText(message, {
+    await ctx.reply(message, {
       parse_mode: "Markdown",
       reply_markup: keyboard,
     });
