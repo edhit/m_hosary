@@ -506,9 +506,7 @@ bot.action("tafsir_next", async (ctx) => {
       : undefined;
 
     const message = `
-📖 *Продолжение тафсира*
-━━━━━━━━━━━━━━━
-_${tafsirParts[currentTafsirPage]}_
+..._${tafsirParts[currentTafsirPage]}_
 
 Страница: *${currentTafsirPage + 1}/${tafsirParts.length}*
 `;
