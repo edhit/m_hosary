@@ -278,6 +278,7 @@ bot.command("delete_audio", (ctx) => {
 bot.on("text", async (ctx) => {
   try {
     tafsirParts = [];
+    currentTafsirPage = 0;
     
     const newText = ctx.message.text.trim();
     currentData.text = newText;
