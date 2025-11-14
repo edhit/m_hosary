@@ -19,11 +19,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL;
 const TEMP_FOLDER = path.resolve("./temp");
 const DATA_FILE = path.resolve("./audio_data.json");
-const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID;
-
-// Глобальное хранилище частей
-let tafsirParts = [];
-let currentTafsirPage = 0;
+const ADMIN_USER_ID = process.env.ALLOWED_USER_ID; // Переименовано для ясности
 
 // Настройка логирования
 const logger = winston.createLogger({
@@ -46,15 +42,29 @@ const bot = new Telegraf(BOT_TOKEN);
 // Создание временной папки
 if (!fs.existsSync(TEMP_FOLDER)) fs.mkdirSync(TEMP_FOLDER);
 
-// Глобальные данные
-const currentData = {
-  track: "",
-  text: "",
-  artist: "Mahmoud Al-Hosary",
-  color: "",
-  audioPath: "",
-  message: "",
-};
+// Глобальные данные (теперь для каждого пользователя отдельно)
+const userSessions = new Map();
+
+// Убираем глобальные переменные
+// let tafsirParts = [];
+// let currentTafsirPage = 0;
+
+// Обновляем функцию получения данных пользователя
+function getUserData(userId) {
+  if (!userSessions.has(userId)) {
+    userSessions.set(userId, {
+      track: "",
+      text: "",
+      artist: "Mahmoud Al-Hosary",
+      color: "",
+      audioPath: "",
+      message: "",
+      tafsirParts: [], // Добавляем для тафсира
+      currentTafsirPage: 0, // Добавляем для тафсира
+    });
+  }
+  return userSessions.get(userId);
+}
 
 // --- УТИЛИТЫ ---
 const parsePageRanges = (input) => {
@@ -107,8 +117,6 @@ const clearTempFolder = () => {
   );
 };
 
-// ...existing code...
-
 // --- УТИЛИТА ДЛЯ ЧТЕНИЯ audio_data.json ---
 function getAudioData() {
   try {
@@ -132,13 +140,13 @@ function setAudioData(data) {
 }
 
 // --- УТИЛИТА ДЛЯ ДОБАВЛЕНИЯ МЕТАДАННЫХ ---
-async function metaTags(tags, outputAudioPath, tempMsg, ctx) {
+async function metaTags(tags, outputAudioPath, tempMsg, ctx, userData) {
   NodeID3.write(tags, outputAudioPath, async (err) => {
     if (err) {
       return false;
     }
 
-    currentData.audioPath = outputAudioPath;
+    userData.audioPath = outputAudioPath;
     await ctx.deleteMessage(tempMsg.message_id);
 
     await ctx.reply(
@@ -156,7 +164,7 @@ async function metaTags(tags, outputAudioPath, tempMsg, ctx) {
           Markup.button.callback("🟥", "color_🟥"),
         ],
         // Кнопка тафсира — добавляем только если один аят
-        ...(currentData.text && /^\d+$/.test(currentData.text.trim())
+        ...(userData.text && /^\d+$/.test(userData.text.trim())
           ? [[Markup.button.callback("📖 Показать тафсир", "show_tafsir")]]
           : []),
       ])
@@ -164,23 +172,36 @@ async function metaTags(tags, outputAudioPath, tempMsg, ctx) {
   });
 }
 
-// --- MIDDLEWARE ---
+// --- MIDDLEWARE ДЛЯ ЛОГИРОВАНИЯ ---
 bot.use(async (ctx, next) => {
-  try {
-    if (!ALLOWED_USER_ID || ctx.from?.id?.toString() !== ALLOWED_USER_ID) {
-      return;
-    }
-    await next();
-  } catch (err) {
-    logger.error(`Middleware error: ${err.message}`);
-    ctx.reply("⚠️ Ошибка проверки доступа.");
-  }
+  const userId = ctx.from?.id;
+  const username = ctx.from?.username || "без username";
+  const firstName = ctx.from?.first_name || "без имени";
+
+  logger.info(
+    `Пользователь ${userId} (@${username}, ${firstName}) вызвал команду: ${
+      ctx.message?.text || "callback"
+    }`
+  );
+  await next();
 });
+
+// --- ФУНКЦИЯ ПРОВЕРКИ АДМИНА ---
+function isAdmin(userId) {
+  return ADMIN_USER_ID && userId.toString() === ADMIN_USER_ID;
+}
 
 // --- КОМАНДЫ ---
 bot.start((ctx) => {
   ctx.reply(
-    "Добро пожаловать!\n\nИспользуйте /surah <номер> для выбора суры и отправьте номера аятов для создания аудио.\n\nИспользуйте /help для получения справки."
+    "Добро пожаловать в бота для создания аудио из Корана!\n\n" +
+      "Основные команды:\n" +
+      "/surah <номер> - выбрать суру\n" +
+      "/help - полная справка\n\n" +
+      "Как использовать:\n" +
+      "1. Выберите суру: /surah 1\n" +
+      "2. Отправьте номера аятов: 1-5, 7, 10\n" +
+      "3. Выберите цвет и отправьте аудио"
   );
 });
 
@@ -192,38 +213,45 @@ bot.command("help", (ctx) => {
 <b>/start</b> — Приветствие и краткая инструкция.
 <b>/help</b> — Показать это справочное сообщение.
 <b>/surah &lt;номер&gt;</b> — Указать номер суры для создания аудио (например: /surah 5).
+<b>/colors</b> — Показать значение цветов.
+
+${
+  isAdmin(ctx.from.id)
+    ? `
+<b>Команды администратора:</b>
 <b>/clear_all</b> — Сбросить все текущие данные и очистить временные файлы.
 <b>/list_audio</b> — Показать список последних 10 аудиофайлов.
-<b>/delete_audio &lt;номер&gt;</b> — Удалить аудиозапись по номеру из списка (/list_audio).
-<b>/colors &lt;цвет&gt;</b> — Выбрать цвет для аудио (после создания).
+<b>/delete_audio &lt;номер&gt;</b> — Удалить аудиозапись по номеру из списка.
+`
+    : ""
+}
 
 <b>Создание аудио:</b>
 1. Укажите суру командой <b>/surah &lt;номер&gt;</b>.
 2. Отправьте номера аятов (например: 1-5, 7, 10).
-3. Следуйте инструкциям для выбора цвета и отправки аудио.
+3. Следуйте инструкциям для выбора цвета.
 
 <b>Примечание:</b>
-Доступ к функциям бота ограничен для определённого пользователя.
+Бот создаёт аудиофайлы из Корана в исполнении Махмуда Аль-Хусари.
   `;
   ctx.reply(helpMsg, { parse_mode: "HTML" });
 });
 
 bot.command("surah", (ctx) => {
+  const userData = getUserData(ctx.from.id);
   const newTrack = ctx.message.text.replace("/surah", "").trim();
   if (newTrack && !isNaN(newTrack)) {
-    currentData.track = newTrack;
+    userData.track = newTrack;
     ctx.reply(`Сура обновлена: ${newTrack}`);
   } else {
-    ctx.reply("Пожалуйста, укажите номер суры, например: /surah 5", {
-      parse_mode: "Markdown",
-    });
+    ctx.reply("Пожалуйста, укажите номер суры, например: /surah 5");
   }
 });
 
 // --- КОМАНДА ДЛЯ ПРОСМОТРА ЗНАЧЕНИЕ ЦВЕТОВ ---
 bot.command("colors", (ctx) => {
   const colorsMsg = `
-Что означают цвета привыборе? 
+Что означают цвета при выборе? 
 
 🔵 Аяты указывающие на могущество Всевышнего Аллаха
 🟢 Достоинства пророка и его атрибуты, Атрибуты верующих и их награда. Рай и его описание
@@ -236,9 +264,14 @@ bot.command("colors", (ctx) => {
   ctx.reply(colorsMsg);
 });
 
-// --- КОМАНДА ДЛЯ СБРОСА ВСЕХ ДАННЫХ ---
+// --- КОМАНДА ДЛЯ СБРОСА ВСЕХ ДАННЫХ (ТОЛЬКО ДЛЯ АДМИНА) ---
 bot.command("clear_all", (ctx) => {
-  Object.assign(currentData, {
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.reply("❌ Эта команда доступна только администратору.");
+  }
+
+  const userData = getUserData(ctx.from.id);
+  Object.assign(userData, {
     track: "",
     text: "",
     color: "",
@@ -249,8 +282,12 @@ bot.command("clear_all", (ctx) => {
   ctx.reply("Данные сброшены.");
 });
 
-// --- КОМАНДА ДЛЯ ПРОСМОТРА СПИСКА АУДИО ---
+// --- КОМАНДА ДЛЯ ПРОСМОТРА СПИСКА АУДИО (ТОЛЬКО ДЛЯ АДМИНА) ---
 bot.command("list_audio", (ctx) => {
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.reply("❌ Эта команда доступна только администратору.");
+  }
+
   const data = getAudioData();
   if (!data.length) {
     return ctx.reply("Список аудиофайлов пуст.");
@@ -269,8 +306,12 @@ bot.command("list_audio", (ctx) => {
   ctx.reply(msg, { parse_mode: "HTML" });
 });
 
-// --- КОМАНДА ДЛЯ УДАЛЕНИЯ ЗАПИСИ ПО ИНДЕКСУ (из последних 10) ---
+// --- КОМАНДА ДЛЯ УДАЛЕНИЯ ЗАПИСИ ПО ИНДЕКСУ (ТОЛЬКО ДЛЯ АДМИНА) ---
 bot.command("delete_audio", (ctx) => {
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.reply("❌ Эта команда доступна только администратору.");
+  }
+
   const args = ctx.message.text.split(" ").slice(1);
   const data = getAudioData();
   const last10 = data.slice(-10);
@@ -293,40 +334,50 @@ bot.command("delete_audio", (ctx) => {
 
 // --- ОБРАБОТКА ТЕКСТА ---
 bot.on("text", async (ctx) => {
+  // Пропускаем команды
+  if (ctx.message.text.startsWith("/")) {
+    return;
+  }
+
   try {
-    tafsirParts = [];
-    currentTafsirPage = 0;
+    const userData = getUserData(ctx.from.id);
+    // Сбрасываем данные тафсира для этого пользователя
+    userData.tafsirParts = [];
+    userData.currentTafsirPage = 0;
 
     const newText = ctx.message.text.trim();
-    currentData.text = newText;
+    userData.text = newText;
 
-    if (!currentData.track || !currentData.text) {
+    if (!userData.track || !userData.text) {
       return ctx.reply(
         "Пожалуйста, укажите номер суры (/surah) и номера аятов (отправьте текст)."
       );
     }
 
-    const ayahs = parsePageRanges(currentData.text);
+    const ayahs = parsePageRanges(userData.text);
     if (!ayahs || ayahs.includes(0))
       return ctx.reply("Некорректно указаны номера аятов.");
 
     const tempMsg = await ctx.reply("Обработка аудио...");
 
-    const settings = { ayahs, surah: parseInt(currentData.track) };
+    const settings = { ayahs, surah: parseInt(userData.track) };
     const outputAudio = await mp3create(settings);
     const outputAudioPath = path.join(outputAudio.folder, outputAudio.file);
 
     const tags = {
-      title: `Surah ${currentData.track} ${
-        surahs[Number(currentData.track) - 1]?.name_en || "Unknown"
-      } (${currentData.text})`,
-      artist: currentData.artist,
+      title: `Surah ${userData.track} ${
+        surahs[Number(userData.track) - 1]?.name_en || "Unknown"
+      } (${userData.text})`,
+      artist: userData.artist,
       year: new Date().getFullYear(),
     };
 
     let i = 0;
     while (i < 3) {
-      if ((await metaTags(tags, outputAudioPath, tempMsg, ctx)) !== false)
+      if (
+        (await metaTags(tags, outputAudioPath, tempMsg, ctx, userData)) !==
+        false
+      )
         break;
       i++;
       console.log(i);
@@ -342,41 +393,42 @@ bot.on("text", async (ctx) => {
 bot.action(/color_(.+)/, async (ctx) => {
   try {
     await ctx.deleteMessage();
+    const userData = getUserData(ctx.from.id);
     const colorAction = ctx.match[1];
-    currentData.color = colorAction;
+    userData.color = colorAction;
 
     // Проверка всех необходимых данных
     if (
-      !currentData.audioPath ||
-      !currentData.track ||
-      !currentData.text ||
-      !currentData.artist
+      !userData.audioPath ||
+      !userData.track ||
+      !userData.text ||
+      !userData.artist
     ) {
       return ctx.reply(
         "Недостаточно данных для отправки аудио. Пожалуйста, начните заново."
       );
     }
 
-    const surahInfo = surahs[Number(currentData.track) - 1] || {};
-    currentData.message = `${colorAction} Сура ${currentData.track} «${
+    const surahInfo = surahs[Number(userData.track) - 1] || {};
+    userData.message = `${colorAction} Сура ${userData.track} «${
       surahInfo.name_en
-    } (${surahInfo.name_ru}), ${
-      currentData.text.includes("-") ? "аяты" : "аят"
-    } ${currentData.text}» - Махмуд Аль-Хусари\n\n#коран ${toHashtag(
-      surahInfo.name_en
-    )}`;
+    } (${surahInfo.name_ru}), ${userData.text.includes("-") ? "аяты" : "аят"} ${
+      userData.text
+    }» - Махмуд Аль-Хусари\n\n#коран ${toHashtag(surahInfo.name_en)}`;
 
     await ctx.replyWithAudio(
       {
-        source: currentData.audioPath,
-        filename: `${currentData.artist} - ${surahInfo.name_en} - ${currentData.text}.mp3`,
+        source: userData.audioPath,
+        filename: `${userData.artist} - ${surahInfo.name_en} - ${userData.text}.mp3`,
       },
       {
-        caption: currentData.message,
-        ...Markup.inlineKeyboard([
-          Markup.button.callback("✅ Отправить", "send_audio"),
-          Markup.button.callback("❌ Отмена", "cancel_audio"),
-        ]),
+        caption: userData.message,
+        ...(isAdmin(ctx.from.id)
+          ? Markup.inlineKeyboard([
+              Markup.button.callback("✅ Отправить", "send_audio"),
+              Markup.button.callback("❌ Отмена", "cancel_audio"),
+            ])
+          : { reply_markup: { inline_keyboard: [] } }), // Пустая клавиатура для обычных пользователей
       }
     );
   } catch (err) {
@@ -389,15 +441,17 @@ bot.action(/color_(.+)/, async (ctx) => {
 bot.action("send_audio", async (ctx) => {
   try {
     await ctx.deleteMessage();
-    if (!currentData.audioPath) return ctx.reply("Аудиофайл не найден.");
+    const userData = getUserData(ctx.from.id);
+
+    if (!userData.audioPath) return ctx.reply("Аудиофайл не найден.");
 
     const sentAudio = await bot.telegram.sendAudio(
       CHANNEL_ID || ctx.chat.id,
       {
-        source: currentData.audioPath,
-        filename: path.basename(currentData.audioPath),
+        source: userData.audioPath,
+        filename: path.basename(userData.audioPath),
       },
-      { caption: currentData.message }
+      { caption: userData.message }
     );
     const file_id = sentAudio.audio.file_id;
 
@@ -411,18 +465,21 @@ bot.action("send_audio", async (ctx) => {
     }
 
     allData.push({
-      color: currentData.color,
-      surah: currentData.track,
-      ayahs: parsePageRanges(currentData.text),
+      color: userData.color,
+      surah: userData.track,
+      ayahs: parsePageRanges(userData.text),
       file_id,
       timestamp: new Date().toISOString(),
+      user_id: ctx.from.id, // Сохраняем ID пользователя
+      username: ctx.from.username || "unknown",
     });
 
     fs.writeFileSync(DATA_FILE, JSON.stringify(allData, null, 2), "utf-8");
     ctx.reply("Аудиофайл отправлен и сохранён.");
     clearTempFolder();
-    Object.assign(currentData, {
-      // track: "",
+
+    // Сбрасываем только данные этого пользователя
+    Object.assign(userData, {
       text: "",
       color: "",
       audioPath: "",
@@ -437,19 +494,21 @@ bot.action("send_audio", async (ctx) => {
 bot.action("show_tafsir", async (ctx) => {
   try {
     await ctx.answerCbQuery("Загружаю тафсир...");
+    const userData = getUserData(ctx.from.id);
 
-    const surah = parseInt(currentData.track);
-    const ayah = parseInt(currentData.text);
-    const surahInfo = surahs[Number(currentData.track) - 1] || {};
+    const surah = parseInt(userData.track);
+    const ayah = parseInt(userData.text);
+    const surahInfo = surahs[Number(userData.track) - 1] || {};
 
     // Сбрасываем старые данные каждый раз при открытии
-    tafsirParts = [];
-    currentTafsirPage = 0;
+    userData.tafsirParts = [];
+    userData.currentTafsirPage = 0;
 
     // Загружаем текст
     const tafsir = await getTafsir(surah, ayah);
 
     if (!tafsir) {
+      await ctx.answerCbQuery("❌ Тафсир не найден.");
       return await ctx.editMessageText("⚠️ Тафсир не найден.");
     }
 
@@ -460,17 +519,23 @@ bot.action("show_tafsir", async (ctx) => {
 
     for (const word of words) {
       if ((current + " " + word).length > maxLength) {
-        tafsirParts.push(current.trim() + "...");
+        userData.tafsirParts.push(current.trim() + "...");
         current = word;
       } else {
         current += " " + word;
       }
     }
-    if (current.trim()) tafsirParts.push(current.trim());
+    if (current.trim()) userData.tafsirParts.push(current.trim());
+
+    // Проверяем, что тафсир успешно разбит на части
+    if (!userData.tafsirParts || userData.tafsirParts.length === 0) {
+      await ctx.answerCbQuery("❌ Ошибка при обработке тафсира.");
+      return await ctx.editMessageText("⚠️ Ошибка при обработке тафсира.");
+    }
 
     // Формируем клавиатуру (если больше одной части)
     const keyboard =
-      tafsirParts.length > 1
+      userData.tafsirParts.length > 1
         ? {
             inline_keyboard: [
               [{ text: "Показать ещё", callback_data: "tafsir_next" }],
@@ -479,13 +544,13 @@ bot.action("show_tafsir", async (ctx) => {
         : undefined;
 
     const message = `
-📖 *Тафсир ас-Са’ди*
+📖 *Тафсир ас-Са'ди*
 ━━━━━━━━━━━━━━━
 🕋 *Сура:* ${surah} ${surahInfo.name_ru}
 🔹 *Аят:* ${ayah}
 
 💬 *Толкование:*
-_${tafsirParts[0]}_
+_${userData.tafsirParts[0]}_
 `;
 
     await ctx.editMessageText(message, {
@@ -494,23 +559,37 @@ _${tafsirParts[0]}_
     });
   } catch (err) {
     console.error(err);
-    await ctx.reply("Ошибка при загрузке. Попробуйте позже.");
+    await ctx.answerCbQuery("❌ Ошибка при загрузке.");
+    await ctx.reply("Ошибка при загрузке тафсира. Попробуйте позже.");
   }
 });
-
 // ===========================
 //  Показать следующую часть
 // ===========================
 bot.action("tafsir_next", async (ctx) => {
   try {
     await ctx.answerCbQuery();
+    const userData = getUserData(ctx.from.id);
+
+    // Проверяем, есть ли данные тафсира
+    if (!userData.tafsirParts || userData.tafsirParts.length === 0) {
+      await ctx.answerCbQuery("❌ Данные тафсира не найдены. Начните заново.");
+      return;
+    }
+
+    // Проверяем, существует ли следующая страница
+    if (userData.currentTafsirPage >= userData.tafsirParts.length - 1) {
+      await ctx.answerCbQuery("❌ Это последняя страница тафсира.");
+      return;
+    }
 
     // 1️⃣ Удаляем клавиатуру у старого сообщения
     await ctx.editMessageReplyMarkup();
 
-    currentTafsirPage++;
+    userData.currentTafsirPage++;
 
-    const hasMore = currentTafsirPage < tafsirParts.length - 1;
+    const hasMore =
+      userData.currentTafsirPage < userData.tafsirParts.length - 1;
 
     const keyboard = hasMore
       ? {
@@ -520,10 +599,17 @@ bot.action("tafsir_next", async (ctx) => {
         }
       : undefined;
 
-    const message = `
-..._${tafsirParts[currentTafsirPage]}_
+    // Проверяем, что текст существует
+    const currentTafsirText = userData.tafsirParts[userData.currentTafsirPage];
+    if (!currentTafsirText) {
+      await ctx.answerCbQuery("❌ Ошибка: текст тафсира не найден.");
+      return;
+    }
 
-Страница: *${currentTafsirPage + 1}/${tafsirParts.length}*
+    const message = `
+..._${currentTafsirText}_
+
+Страница: *${userData.currentTafsirPage + 1}/${userData.tafsirParts.length}*
 `;
 
     // 2️⃣ Новую часть отправляем через ctx.reply
@@ -533,18 +619,33 @@ bot.action("tafsir_next", async (ctx) => {
     });
   } catch (err) {
     console.error(err);
-    ctx.answerCbQuery("Ошибка.");
+    await ctx.answerCbQuery("❌ Ошибка при загрузке тафсира.");
   }
 });
 
 bot.action("cancel_audio", async (ctx) => {
+  const userData = getUserData(ctx.from.id);
   await ctx.deleteMessage();
   ctx.reply("Отправка отменена.");
   clearTempFolder();
-  Object.assign(currentData, { audioPath: "", color: "", text: "", track: "" });
+  Object.assign(userData, {
+    audioPath: "",
+    color: "",
+    text: "",
+    // track: "" // Оставляем выбранную суру для удобства
+  });
 });
 
-// ...existing code...
+// --- ОЧИСТКА СТАРЫХ СЕССИЙ (ОПЦИОНАЛЬНО) ---
+setInterval(() => {
+  const now = Date.now();
+  const MAX_SESSION_AGE = 60 * 60 * 1000; // 1 час
+
+  for (const [userId, data] of userSessions.entries()) {
+    // Если у данных есть timestamp, можно добавить проверку на возраст
+    // Пока просто оставляем очистку на будущее
+  }
+}, 30 * 60 * 1000); // Проверка каждые 30 минут
 
 // --- ЗАПУСК БОТА ---
 bot
