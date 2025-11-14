@@ -22,8 +22,9 @@ const DATA_FILE = path.resolve("./audio_data.json");
 const ALLOWED_USER_ID = process.env.ALLOWED_USER_ID;
 
 
-// Глобальное хранилище для текущего тафсира
+// Глобальное хранилище частей
 let tafsirParts = [];
+let currentTafsirPage = 0;
 
 // Настройка логирования
 const logger = winston.createLogger({
@@ -415,6 +416,8 @@ bot.action("send_audio", async (ctx) => {
   }
 });
 
+
+
 bot.action("show_tafsir", async (ctx) => {
   try {
     await ctx.answerCbQuery("Загружаю тафсир...");
@@ -423,53 +426,48 @@ bot.action("show_tafsir", async (ctx) => {
     const ayah = parseInt(currentData.text);
     const surahInfo = surahs[Number(currentData.track) - 1] || {};
 
-    // Если тафсир еще не загружен — загружаем и делим
-    if (tafsirParts.length === 0) {
-      const tafsir = await getTafsir(surah, ayah);
+    // Сбрасываем старые данные каждый раз при открытии
+    tafsirParts = [];
+    currentTafsirPage = 0;
 
-      if (!tafsir) {
-        return await ctx.editMessageText("⚠️ Тафсир не найден или произошла ошибка при загрузке.");
-      }
+    // Загружаем текст
+    const tafsir = await getTafsir(surah, ayah);
 
-      // 🔹 Разбиваем по словам, чтобы не обрывать их
-      const words = tafsir.split(" ");
-      let currentPart = "";
-      const maxLength = 1024;
-
-      for (const word of words) {
-        // +1 на пробел
-        if ((currentPart + " " + word).length > maxLength) {
-          // Добавляем многоточие, если не последняя часть
-          tafsirParts.push(currentPart.trim() + "...");
-          currentPart = word; // начинаем новую часть
-        } else {
-          currentPart += " " + word;
-        }
-      }
-      // Добавляем последнюю часть
-      if (currentPart.trim()) tafsirParts.push(currentPart.trim());
+    if (!tafsir) {
+      return await ctx.editMessageText("⚠️ Тафсир не найден.");
     }
 
-    // 🔹 Клавиатура в одну строку
-    const keyboard =
-      tafsirParts.length > 1
-        ? {
-            inline_keyboard: [
-              tafsirParts.map((_, i) => ({
-                text: `${i + 1}`,
-                callback_data: `tafsir_page_${i}`,
-              })),
-            ],
-          }
-        : undefined;
+    // Разбивка по словам
+    const words = tafsir.split(" ");
+    const maxLength = 1024;
+    let current = "";
+
+    for (const word of words) {
+      if ((current + " " + word).length > maxLength) {
+        tafsirParts.push(current.trim() + "...");
+        current = word;
+      } else {
+        current += " " + word;
+      }
+    }
+    if (current.trim()) tafsirParts.push(current.trim());
+
+    // Формируем клавиатуру (если больше одной части)
+    const keyboard = tafsirParts.length > 1
+      ? {
+          inline_keyboard: [
+            [{ text: "Показать ещё", callback_data: "tafsir_next" }]
+          ]
+        }
+      : undefined;
 
     const message = `
-📖 *Тафсир ас-Са’ди*  
-━━━━━━━━━━━━━━━  
+📖 *Тафсир ас-Са’ди*
+━━━━━━━━━━━━━━━
 🕋 *Сура:* ${surah} ${surahInfo.name_ru}
 🔹 *Аят:* ${ayah}
 
-💬 *Толкование (стр. 1/${tafsirParts.length}):* 
+💬 *Толкование:*
 _${tafsirParts[0]}_
 `;
 
@@ -477,52 +475,56 @@ _${tafsirParts[0]}_
       parse_mode: "Markdown",
       reply_markup: keyboard,
     });
+
   } catch (err) {
-    console.error("Ошибка при показе тафсира:", err.message);
-    await ctx.reply("❌ Ошибка при загрузке тафсира. Попробуйте позже.");
+    console.error(err);
+    await ctx.reply("Ошибка при загрузке. Попробуйте позже.");
   }
 });
 
-// Обработка переключения страниц
-bot.action(/tafsir_page_(\d+)/, async (ctx) => {
+// ===========================
+//  Показать следующую часть
+// ===========================
+bot.action("tafsir_next", async (ctx) => {
   try {
-    const page = parseInt(ctx.match[1]);
-    if (tafsirParts.length === 0) {
-      return await ctx.answerCbQuery("❌ Тафсир не загружен.");
-    }
+    await ctx.answerCbQuery();
+
+    currentTafsirPage++;
+
+    // Если частей больше нет — убираем кнопку
+    const keyboard = currentTafsirPage < tafsirParts.length - 1
+      ? {
+          inline_keyboard: [
+            [{ text: "Показать ещё", callback_data: "tafsir_next" }]
+          ]
+        }
+      : undefined;
 
     const surah = parseInt(currentData.track);
     const ayah = parseInt(currentData.text);
     const surahInfo = surahs[Number(currentData.track) - 1] || {};
 
     const message = `
-📖 *Тафсир ас-Са’ди*  
-━━━━━━━━━━━━━━━  
+📖 *Тафсир ас-Са’ди*
+━━━━━━━━━━━━━━━
 🕋 *Сура:* ${surah} ${surahInfo.name_ru}
 🔹 *Аят:* ${ayah}
 
-💬 *Толкование (стр. ${page + 1}/${tafsirParts.length}):*  
-_${tafsirParts[page]}_
-`;
+💬 *Продолжение:*
+_${tafsirParts[currentTafsirPage]}_
 
-    const keyboard = {
-      inline_keyboard: [
-        tafsirParts.map((_, i) => ({
-          text: `${i + 1}`,
-          callback_data: `tafsir_page_${i}`,
-        })),
-      ],
-    };
+━━━━━━━━━━━━━━━
+Страница: *${currentTafsirPage + 1}/${tafsirParts.length}*
+`;
 
     await ctx.editMessageText(message, {
       parse_mode: "Markdown",
       reply_markup: keyboard,
     });
 
-    await ctx.answerCbQuery(`Страница ${page + 1}`);
   } catch (err) {
-    console.error("Ошибка при переключении страниц:", err.message);
-    await ctx.answerCbQuery("❌ Ошибка при переключении страницы.");
+    console.error(err);
+    await ctx.answerCbQuery("Ошибка.");
   }
 });
 
