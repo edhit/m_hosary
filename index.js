@@ -68,6 +68,35 @@ function getUserData(userId) {
   return userSessions.get(userId);
 }
 
+// Форматирование нумерованного текста
+function formatNumberedText(text) {
+  // Разделяем текст по цифрам с точками
+  const parts = text.split(/(\d+\.)\s*/);
+
+  let formattedText = "";
+  let currentNumber = "";
+
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i].trim();
+
+    // Если часть - это номер (например "1.")
+    if (part.match(/^\d+\.$/)) {
+      currentNumber = part;
+    }
+    // Если часть - это текст после номера
+    else if (currentNumber && part) {
+      formattedText += `${currentNumber} ${part}\n\n`;
+      currentNumber = "";
+    }
+    // Если часть - обычный текст без номера
+    else if (part) {
+      formattedText += part + " ";
+    }
+  }
+
+  return formattedText.trim();
+}
+
 // --- УТИЛИТЫ ---
 const parsePageRanges = (input) => {
   if (!input || typeof input !== "string") return [];
@@ -547,7 +576,7 @@ bot.action("show_tafsir", async (ctx) => {
     userData.currentTafsirPage = 0;
 
     // Загружаем текст
-    const tafsir = await getTafsir(surah, ayah);
+    const tafsir = formatNumberedText(await getTafsir(surah, ayah));
 
     if (!tafsir) {
       await ctx.answerCbQuery("❌ Тафсир не найден.");
@@ -556,7 +585,7 @@ bot.action("show_tafsir", async (ctx) => {
 
     // Разбивка по словам
     const words = tafsir.split(" ");
-    const maxLength = 512;
+    const maxLength = 1300;
     let current = "";
 
     for (const word of words) {

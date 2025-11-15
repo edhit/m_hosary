@@ -1,19 +1,39 @@
-// tafsir.js
-const fetch = require("node-fetch");
-
-async function getTafsir(surah, ayah, lang = "ru") {
-  const tafsirType =
-    lang === "ar" ? "ar-tafseer-al-saddi" : "ru-tafseer-al-saddi";
-  const url = `https://cdn.jsdelivr.net/gh/spa5k/tafsir_api@main/tafsir/${tafsirType}/${surah}/${ayah}.json`;
-
+const getTafsir = async (surah, ayah) => {
   try {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const data = await response.json();
-    return data?.text || "❌ Тафсир не найден.";
-  } catch (err) {
-    return `⚠️ Ошибка при получении тафсира: ${err.message}`;
-  }
-}
+    console.log(`Запрос тафсира для суры ${surah}, аят ${ayah}`);
 
+    const response = await fetch(
+      `https://api.quran.com/api/v4/tafsirs/170/by_ayah/${surah}:${ayah}`
+    );
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    if (data.tafsir && data.tafsir.verses && data.tafsir.text) {
+      // Получаем первый аят из verses (это единственный аят с тафсиром)
+      const firstVerseKey = Object.keys(data.tafsir.verses)[0];
+      const [firstSurah, firstAyah] = firstVerseKey.split(":").map(Number);
+
+      // Проверяем, совпадает ли запрошенный аят с первым аятом (который имеет тафсир)
+      if (firstSurah === surah && firstAyah === ayah) {
+        // console.log(`Тафсир найден для ${surah}:${ayah}`);
+        return data.tafsir.text;
+      } else {
+        // console.log(
+        //   `Тафсира нет для ${surah}:${ayah} (тафсир есть только для ${firstVerseKey})`
+        // );
+        return `Тафсира нет для ${surah}:${ayah} (тафсир есть только для ${firstVerseKey})`;
+      }
+    } else {
+      // console.log(`Нет данных тафсира для ${surah}:${ayah}`);
+      return null;
+    }
+  } catch (error) {
+    // console.error("Tafsir API error:", error);
+    return null;
+  }
+};
 module.exports = { getTafsir };
