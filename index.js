@@ -11,6 +11,7 @@ const surahs = require("./quran.json");
 const { mp3create } = require("./mp3create");
 const { getTafsir } = require("./tafsir");
 const { button } = require("telegraf/markup");
+const { getKulievTranslation } = require("./translate");
 
 // Настройка ffmpeg
 ffmpeg.setFfmpegPath(ffmpegPath);
@@ -193,17 +194,32 @@ function isAdmin(userId) {
   return ADMIN_USER_ID && userId.toString() === ADMIN_USER_ID;
 }
 
+function writeID3(tags, path) {
+  return new Promise((resolve, reject) => {
+    NodeID3.write(tags, path, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
 async function metaTags(tags, outputAudioPath, tempMsg, ctx, userData) {
-  NodeID3.write(tags, outputAudioPath, async (err) => {
-    if (err) {
-      return false;
-    }
+  try {
+    // Ждём запись тегов
+    await writeID3(tags, outputAudioPath);
 
     userData.audioPath = outputAudioPath;
-    await ctx.deleteMessage(tempMsg.message_id);
+
+    // Безопасное удаление сообщения
+    try {
+      await ctx.deleteMessage(tempMsg.message_id);
+    } catch (e) {
+      console.error("Ошибка удаления сообщения:", e.message);
+    }
+
+    const isOneAyah = userData.text && /^\d+$/.test(userData.text.trim());
 
     if (isAdmin(ctx.from.id)) {
-      // Для администратора - показываем цвета и тафсир
       await ctx.reply(
         "Выберите цвет перед подтверждением:",
         Markup.inlineKeyboard([
@@ -218,40 +234,141 @@ async function metaTags(tags, outputAudioPath, tempMsg, ctx, userData) {
             Markup.button.callback("🟠", "color_🟠"),
             Markup.button.callback("🟥", "color_🟥"),
           ],
-          // Кнопка тафсира — добавляем только если один аят
-          ...(userData.text && /^\d+$/.test(userData.text.trim())
-            ? [[Markup.button.callback("📖 Показать тафсир", "show_tafsir")]]
+          ...(isOneAyah
+            ? [
+                [
+                  Markup.button.callback(
+                    "📖 Показать перевод",
+                    "show_translate"
+                  ),
+                ],
+                [Markup.button.callback("📘 Показать тафсир", "show_tafsir")],
+              ]
             : []),
         ])
       );
     } else {
-      // Для обычного пользователя - показываем кнопку "Отправить выбранные аяты"
       await ctx.reply(
         "Аудио готово!",
         Markup.inlineKeyboard([
           [Markup.button.callback("📤 Отправить выбранные аяты", "color_🔵")],
-          // Кнопка тафсира — добавляем только если один аят
-          ...(userData.text && /^\d+$/.test(userData.text.trim())
-            ? [[Markup.button.callback("📖 Показать тафсир", "show_tafsir")]]
+          ...(isOneAyah
+            ? [
+                [
+                  Markup.button.callback(
+                    "📖 Показать перевод",
+                    "show_translate"
+                  ),
+                ],
+                [Markup.button.callback("📘 Показать тафсир", "show_tafsir")],
+              ]
             : []),
         ])
       );
     }
-  });
+
+    return true;
+  } catch (err) {
+    console.error("metaTags error:", err);
+    return false;
+  }
+}
+
+async function showTafsir(ctx, reply) {
+  try {
+    await ctx.answerCbQuery("Загружаю...");
+    const userData = getUserData(ctx.from.id);
+
+    if (reply) {
+      await ctx.editMessageReplyMarkup();
+    }
+
+    const surah = parseInt(userData.track);
+    const ayah = parseInt(userData.text);
+    const surahInfo = surahs[Number(userData.track) - 1] || {};
+
+    // Сбрасываем старые данные каждый раз при открытии
+    userData.tafsirParts = [];
+    userData.currentTafsirPage = 0;
+
+    // Загружаем текст
+    const tafsir = formatNumberedText(await getTafsir(surah, ayah));
+
+    if (!tafsir) {
+      await ctx.answerCbQuery("❌ Тафсир не найден.");
+      return await ctx.editMessageText("⚠️ Тафсир не найден.");
+    }
+
+    // Разбивка по словам
+    const words = tafsir.split(" ");
+    const maxLength = 512;
+    let current = "";
+
+    for (const word of words) {
+      if ((current + " " + word).length > maxLength) {
+        userData.tafsirParts.push(current.trim() + "...");
+        current = word;
+      } else {
+        current += " " + word;
+      }
+    }
+    if (current.trim()) userData.tafsirParts.push(current.trim());
+
+    // Проверяем, что тафсир успешно разбит на части
+    if (!userData.tafsirParts || userData.tafsirParts.length === 0) {
+      await ctx.answerCbQuery("❌ Ошибка при обработке тафсира.");
+      return await ctx.editMessageText("⚠️ Ошибка при обработке тафсира.");
+    }
+
+    // Формируем клавиатуру (если больше одной части)
+    const keyboard =
+      userData.tafsirParts.length > 1
+        ? {
+            inline_keyboard: [
+              [{ text: "Показать ещё", callback_data: "tafsir_next" }],
+            ],
+          }
+        : undefined;
+
+    const message = `
+📖 *Тафсир ас-Са'ди*
+━━━━━━━━━━━━━━━
+🕋 *Сура:* ${surah} ${surahInfo.name_ru}
+🔹 *Аят:* ${ayah}
+
+💬 *Толкование:*
+_${userData.tafsirParts[0]}_
+`;
+
+    if (reply) {
+      await ctx.reply(message, {
+        parse_mode: "Markdown",
+        reply_markup: keyboard,
+      });
+    } else {
+      await ctx.editMessageText(message, {
+        parse_mode: "Markdown",
+        reply_markup: keyboard,
+      });
+    }
+  } catch (err) {
+    console.error(err);
+    await ctx.answerCbQuery("❌ Ошибка при загрузке.");
+    await ctx.reply("Ошибка при загрузке тафсира. Попробуйте позже.");
+  }
 }
 
 // --- КОМАНДЫ ---
 bot.start((ctx) => {
   ctx.reply(
-    "Добро пожаловать в бота для создания аудио из Корана!\n\n" +
+    "Ассалямуалейкум!\n\n" +
       "Основные команды:\n" +
       "/surah <номер> - выбрать суру\n" +
       "/help - полная справка\n\n" +
       "Как использовать:\n" +
       "1. Выберите суру: /surah 1\n" +
       "2. Отправьте номера аятов: 1-5, 7, 10\n" +
-      "3. Выберите цвет и отправьте аудио",
-    Markup.keyboard([["📖 Выбрать суру"]]).resize()
+      Markup.keyboard([["📖 Выбрать суру"]]).resize()
   );
 });
 
@@ -279,8 +396,6 @@ ${
 <b>Создание аудио:</b>
 1. Укажите суру командой <b>/surah &lt;номер&gt;</b>.
 2. Отправьте номера аятов (например: 1-5, 7, 10).
-3. Следуйте инструкциям для выбора цвета.
-
 
 <b>Примечание:</b>
 Бот создаёт аудиофайлы из Корана в исполнении Махмуда Аль-Хусари.
@@ -291,12 +406,22 @@ ${
 bot.command("surah", (ctx) => {
   const userData = getUserData(ctx.from.id);
   const newTrack = ctx.message.text.replace("/surah", "").trim();
-  if (newTrack && !isNaN(newTrack)) {
-    userData.track = newTrack;
-    ctx.reply(`Сура ${newTrack} выбрана. Теперь отправьте номера аятов.`);
-  } else {
-    ctx.reply("Пожалуйста, укажите номер суры, например: /surah 5");
+
+  // Проверка: число ли это
+  if (!newTrack || isNaN(newTrack)) {
+    return ctx.reply("Укажите номер суры, например: /surah 5");
   }
+
+  const surahNum = Number(newTrack);
+
+  // Проверка диапазона
+  if (surahNum < 1 || surahNum > 114) {
+    return ctx.reply("Номер суры должен быть от 1 до 114");
+  }
+
+  // Всё ок
+  userData.track = surahNum;
+  ctx.reply(`Выбрана сура ${surahNum}. Теперь отправьте номера аятов.`);
 });
 
 // --- КОМАНДА ДЛЯ ПРОСМОТРА ЗНАЧЕНИЕ ЦВЕТОВ ---
@@ -400,20 +525,16 @@ bot.on("text", async (ctx) => {
 
     if (newText === "📖 Выбрать суру") {
       userData.button = true;
-      return ctx.reply("Пожалуйста, введите номер суры");
+      return ctx.reply("Введите номер суры");
     }
 
     if (userData.button) {
       if (!isNaN(newText) && newText >= 1 && newText <= 114) {
         userData.track = newText;
         userData.button = null;
-        return ctx.reply(
-          `Сура ${newText} выбрана. Теперь отправьте номера аятов.`
-        );
+        return ctx.reply(`Выбрана сура ${newText}. Отправьте номера аятов.`);
       } else {
-        return ctx.reply(
-          "Пожалуйста, введите корректный номер суры от 1 до 114."
-        );
+        return ctx.reply("Номер суры должен быть от 1 до 114");
       }
     }
 
@@ -421,7 +542,7 @@ bot.on("text", async (ctx) => {
 
     if (!userData.track || !userData.text) {
       return ctx.reply(
-        "Пожалуйста, укажите номер суры (/surah) и номера аятов (отправьте текст)."
+        "Укажите номер суры (/surah) и номера аятов (отправьте текст)."
       );
     }
 
@@ -476,7 +597,7 @@ bot.action(/color_(.+)/, async (ctx) => {
       !userData.artist
     ) {
       return ctx.reply(
-        "Недостаточно данных для отправки аудио. Пожалуйста, начните заново."
+        "Недостаточно данных для отправки аудио. Начните заново."
       );
     }
 
@@ -562,67 +683,51 @@ bot.action("send_audio", async (ctx) => {
   }
 });
 
-bot.action("show_tafsir", async (ctx) => {
+bot.action("show_translate", async (ctx) => {
   try {
-    await ctx.answerCbQuery("Загружаю тафсир...");
+    await ctx.answerCbQuery("Загружаю перевод...");
+
     const userData = getUserData(ctx.from.id);
 
-    const surah = parseInt(userData.track);
-    const ayah = parseInt(userData.text);
-    const surahInfo = surahs[Number(userData.track) - 1] || {};
+    const surah = Number(userData.track);
+    const ayah = Number(userData.text);
+    const surahInfo = surahs[surah - 1] || {};
 
-    // Сбрасываем старые данные каждый раз при открытии
-    userData.tafsirParts = [];
-    userData.currentTafsirPage = 0;
-
-    // Загружаем текст
-    const tafsir = formatNumberedText(await getTafsir(surah, ayah));
-
-    if (!tafsir) {
-      await ctx.answerCbQuery("❌ Тафсир не найден.");
-      return await ctx.editMessageText("⚠️ Тафсир не найден.");
+    if (!surah || !ayah) {
+      return ctx.editMessageText("⚠️ Не удалось определить суру и аят.");
     }
 
-    // Разбивка по словам
-    const words = tafsir.split(" ");
-    const maxLength = 512;
-    let current = "";
-
-    for (const word of words) {
-      if ((current + " " + word).length > maxLength) {
-        userData.tafsirParts.push(current.trim() + "...");
-        current = word;
-      } else {
-        current += " " + word;
-      }
-    }
-    if (current.trim()) userData.tafsirParts.push(current.trim());
-
-    // Проверяем, что тафсир успешно разбит на части
-    if (!userData.tafsirParts || userData.tafsirParts.length === 0) {
-      await ctx.answerCbQuery("❌ Ошибка при обработке тафсира.");
-      return await ctx.editMessageText("⚠️ Ошибка при обработке тафсира.");
+    // Загружаем перевод Кулиева
+    let translation;
+    try {
+      translation = await getKulievTranslation(surah, ayah);
+    } catch (e) {
+      console.error("Ошибка getKulievTranslation:", e);
+      return ctx.editMessageText("⚠️ Ошибка загрузки перевода.");
     }
 
-    // Формируем клавиатуру (если больше одной части)
-    const keyboard =
-      userData.tafsirParts.length > 1
-        ? {
-            inline_keyboard: [
-              [{ text: "Показать ещё", callback_data: "tafsir_next" }],
-            ],
-          }
-        : undefined;
+    // Лимит в 2000 символов
+    const maxLen = 2000;
+    if (translation.length > maxLen) {
+      translation = translation.slice(0, maxLen) + "…";
+    }
 
     const message = `
-📖 *Тафсир ас-Са'ди*
+📖 *Перевод Кулиева*
 ━━━━━━━━━━━━━━━
 🕋 *Сура:* ${surah} ${surahInfo.name_ru}
 🔹 *Аят:* ${ayah}
 
-💬 *Толкование:*
-_${userData.tafsirParts[0]}_
+💬 *Перевод:*
+_${translation}_
 `;
+
+    // ❗ Добавляем кнопку Показать тафсир
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: "📘 Перейти к тафсиру", callback_data: "show_tafsir_reply" }],
+      ],
+    };
 
     await ctx.editMessageText(message, {
       parse_mode: "Markdown",
@@ -630,10 +735,19 @@ _${userData.tafsirParts[0]}_
     });
   } catch (err) {
     console.error(err);
-    await ctx.answerCbQuery("❌ Ошибка при загрузке.");
-    await ctx.reply("Ошибка при загрузке тафсира. Попробуйте позже.");
+    await ctx.answerCbQuery("❌ Ошибка.");
+    await ctx.reply("Ошибка при загрузке перевода. Попробуйте позже.");
   }
 });
+
+bot.action("show_tafsir", async (ctx) => {
+  await showTafsir(ctx);
+});
+
+bot.action("show_tafsir_reply", async (ctx) => {
+  await showTafsir(ctx, true);
+});
+
 // ===========================
 //  Показать следующую часть
 // ===========================
