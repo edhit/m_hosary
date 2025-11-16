@@ -585,7 +585,7 @@ bot.action("show_tafsir", async (ctx) => {
 
     // Разбивка по словам
     const words = tafsir.split(" ");
-    const maxLength = 1300;
+    const maxLength = 512;
     let current = "";
 
     for (const word of words) {
