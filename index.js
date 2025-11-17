@@ -43,7 +43,12 @@ const bot = new Telegraf(BOT_TOKEN);
 
 // --- ФУНКЦИЯ ПРОВЕРКИ АДМИНА ---
 function isAdmin(userId) {
-  return ADMIN_USER_ID && userId.toString() === ADMIN_USER_ID;
+  if (!ADMIN_USER_ID) return false;
+
+  // Разрешаем и одиночный ID, и список через запятую
+  const adminIds = ADMIN_USER_ID.split(",").map(id => id.trim());
+
+  return adminIds.includes(userId.toString());
 }
 
 // ---- ADMIN ONLY MIDDLEWARE ----
