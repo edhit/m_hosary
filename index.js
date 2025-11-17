@@ -41,6 +41,39 @@ const logger = winston.createLogger({
 // Инициализация бота
 const bot = new Telegraf(BOT_TOKEN);
 
+// --- ФУНКЦИЯ ПРОВЕРКИ АДМИНА ---
+function isAdmin(userId) {
+  return ADMIN_USER_ID && userId.toString() === ADMIN_USER_ID;
+}
+
+// ---- ADMIN ONLY MIDDLEWARE ----
+
+// Поддержка одного ID или массива ID через запятую
+// Пример в .env:
+// ADMIN_USER_ID=123456
+// или
+// ADMIN_USER_ID=123456,987654,555666
+if (ADMIN_USER_ID) {
+  // Преобразуем строку в массив всегда
+  const adminIds = ADMIN_USER_ID.split(",").map(id => id.trim());
+
+  bot.use((ctx, next) => {
+    const userId = ctx.from?.id?.toString();
+
+    // Если ID в списке — пропускаем
+    if (adminIds.includes(userId)) {
+      return next();
+    }
+
+    // Неадмин → просто игнорируем
+    return;
+    // или можно отправить сообщение:
+    // return ctx.reply("⛔ Этот бот доступен только администратору.");
+  });
+} else {
+  console.error("ADMIN_USER_ID не указан в .env!");
+}
+
 // Создание временной папки
 if (!fs.existsSync(TEMP_FOLDER)) fs.mkdirSync(TEMP_FOLDER);
 
@@ -185,10 +218,6 @@ bot.use(async (ctx, next) => {
   await next();
 });
 
-// --- ФУНКЦИЯ ПРОВЕРКИ АДМИНА ---
-function isAdmin(userId) {
-  return ADMIN_USER_ID && userId.toString() === ADMIN_USER_ID;
-}
 
 
 function writeID3(tags, path) {
