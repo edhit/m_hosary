@@ -190,9 +190,6 @@ function isAdmin(userId) {
   return ADMIN_USER_ID && userId.toString() === ADMIN_USER_ID;
 }
 
-function isAdmin(userId) {
-  return ADMIN_USER_ID && userId.toString() === ADMIN_USER_ID;
-}
 
 function writeID3(tags, path) {
   return new Promise((resolve, reject) => {
