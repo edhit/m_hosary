@@ -1,6 +1,6 @@
 const getTafsir = async (surah, ayah) => {
   try {
-    console.log(`Запрос тафсира для суры ${surah}, аят ${ayah}`);
+    // console.log(`Запрос тафсира для суры ${surah}, аят ${ayah}`);
 
     const response = await fetch(
       `https://api.quran.com/api/v4/tafsirs/170/by_ayah/${surah}:${ayah}`
