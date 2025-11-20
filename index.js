@@ -27,6 +27,7 @@ const TEMP_FOLDER = process.env.TEMP_FOLDER || path.resolve("./temp");
 const DATA_FILE = path.resolve("./audio_data.json");
 const BACKUP_FOLDER = path.resolve("./backups");
 const ADMIN_USER_ID = process.env.ALLOWED_USER_ID;
+const ALERT_CHAT_ID = process.env.ALERT_CHAT_ID;
 
 // Конфигурация
 const config = {
@@ -35,20 +36,38 @@ const config = {
   maxAyahs: parseInt(process.env.MAX_AYAHS) || 20,
   sessionTimeout: parseInt(process.env.SESSION_TIMEOUT) || 60 * 60 * 1000,
   cacheTtl: parseInt(process.env.CACHE_TTL) || 30 * 60 * 1000,
+  userLimits: {
+    requestsPerMinute: parseInt(process.env.REQUESTS_PER_MINUTE) || 10,
+    requestsPerHour: parseInt(process.env.REQUESTS_PER_HOUR) || 50,
+    maxAyahsPerRequest: parseInt(process.env.MAX_AYAHS_PER_REQUEST) || 50,
+  }
 };
 
 // Настройка логирования
 const logger = winston.createLogger({
-  level: "info",
+  level: process.env.LOG_LEVEL || "info",
   format: winston.format.combine(
     winston.format.timestamp(),
-    winston.format.printf(({ level, message, timestamp }) => {
-      return `[${timestamp}] ${level.toUpperCase()}: ${message}`;
-    })
+    winston.format.json()
   ),
   transports: [
-    new winston.transports.Console(),
-    new winston.transports.File({ filename: "bot.log" }),
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      )
+    }),
+    new winston.transports.File({ 
+      filename: "logs/error.log", 
+      level: "error",
+      maxsize: 10485760, // 10MB
+      maxFiles: 5
+    }),
+    new winston.transports.File({ 
+      filename: "logs/combined.log",
+      maxsize: 10485760,
+      maxFiles: 5
+    })
   ],
 });
 
@@ -70,9 +89,91 @@ const CACHE_TTL = config.cacheTtl;
 // Очередь обработки
 const processingQueue = new Map();
 
+// Система лимитов
+const userLimits = new Map();
+
+// Популярные запросы
+const popularRequests = {
+  surahs: new Map(),
+  ayahRanges: new Map(),
+  update: function(surah, ayahs) {
+    try {
+      // Статистика по сурам
+      const surahCount = this.surahs.get(surah) || 0;
+      this.surahs.set(surah, surahCount + 1);
+      
+      // Статистика по диапазонам аятов
+      const range = ayahs.length > 1 ? 'multiple' : 'single';
+      const rangeCount = this.ayahRanges.get(range) || 0;
+      this.ayahRanges.set(range, rangeCount + 1);
+    } catch (error) {
+      console.error("Error updating popular requests:", error);
+    }
+  },
+  getStats: function() {
+    try {
+      return {
+        topSurahs: [...this.surahs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5),
+        rangeStats: Object.fromEntries(this.ayahRanges)
+      };
+    } catch (error) {
+      console.error("Error getting popular stats:", error);
+      return { topSurahs: [], rangeStats: {} };
+    }
+  }
+};
+
+// Система шаблонов сообщений
+const messageTemplates = {
+  welcome: (name) => `
+Ассаляму алейкум, ${name}!
+
+🕌 *Бот для создания аудио из Корана*
+
+📖 **Основные команды:**
+/surah <номер> - выбрать суру
+/surah_info <номер> - информация о суре
+/help - полная справка
+
+**Пример использования:**
+1. /surah 1
+2. Отправьте: 1-5, 7, 10
+
+_Чтение Корана - благословенное дело!_ 🕋
+  `,
+
+  audioReady: (surah, ayahs, isOneAyah = false) => {
+    const base = `🎧 *Аудио готово!*\n\n`;
+    const adminControls = isOneAyah ? `
+📖 Показать перевод
+📘 Показать тафсир
+    ` : '';
+    
+    return base + adminControls;
+  },
+
+  error: (type) => {
+    const errors = {
+      processing: "⚠️ Ошибка при обработке аудио. Попробуйте позже.",
+      validation: "❌ Некорректные данные. Проверьте номер суры и аятов.",
+      timeout: "⏰ Время обработки истекло. Попробуйте снова.",
+      general: "❌ Произошла ошибка. Мы уже работаем над исправлением.",
+      rateLimit: "⏳ Слишком много запросов. Пожалуйста, подождите."
+    };
+    return errors[type] || errors.general;
+  }
+};
+
+// Feature flags
+const featureFlags = {
+  newAudioEngine: process.env.FF_NEW_AUDIO === 'true',
+  enhancedTafsir: process.env.FF_ENHANCED_TAFSIR === 'true',
+  voiceMessages: process.env.FF_VOICE_MESSAGES === 'true'
+};
+
 // Создание необходимых папок
 try {
-  [config.tempFolder, BACKUP_FOLDER].forEach((folder) => {
+  [config.tempFolder, BACKUP_FOLDER, "logs"].forEach((folder) => {
     if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
   });
 } catch (error) {
@@ -145,6 +246,96 @@ async function addToQueue(userId, task) {
   }
 }
 
+// --- СИСТЕМА ЛИМИТОВ ---
+function checkRateLimit(userId) {
+  try {
+    const now = Date.now();
+    const userLimit = userLimits.get(userId) || { 
+      minute: [], 
+      hour: [],
+      lastWarning: 0
+    };
+    
+    // Очистка старых записей
+    userLimit.minute = userLimit.minute.filter(time => now - time < 60000);
+    userLimit.hour = userLimit.hour.filter(time => now - time < 3600000);
+    
+    // Проверка лимитов
+    if (userLimit.minute.length >= config.userLimits.requestsPerMinute) {
+      return { allowed: false, reason: "minute_limit" };
+    }
+    
+    if (userLimit.hour.length >= config.userLimits.requestsPerHour) {
+      return { allowed: false, reason: "hour_limit" };
+    }
+    
+    // Добавление текущего запроса
+    userLimit.minute.push(now);
+    userLimit.hour.push(now);
+    userLimits.set(userId, userLimit);
+    
+    return { allowed: true };
+  } catch (error) {
+    console.error("Error in checkRateLimit:", error);
+    return { allowed: true }; // В случае ошибки разрешаем запрос
+  }
+}
+
+// --- СИСТЕМА МОНИТОРИНГА И АЛЕРТОВ ---
+async function sendAlert(message, level = "ERROR") {
+  try {
+    if (!ALERT_CHAT_ID) return;
+    
+    const alertMsg = `🚨 *${level}*\n${message}\n_${new Date().toISOString()}_`;
+    await bot.telegram.sendMessage(ALERT_CHAT_ID, alertMsg, { 
+      parse_mode: "Markdown" 
+    });
+  } catch (error) {
+    console.error("Alert sending failed:", error);
+  }
+}
+
+const monitorSystem = {
+  start: function() {
+    setInterval(() => {
+      try {
+        const memoryUsage = process.memoryUsage();
+        const memoryPercent = (memoryUsage.heapUsed / memoryUsage.heapTotal * 100).toFixed(2);
+        
+        if (memoryPercent > 80) {
+          sendAlert(`Высокое использование памяти: ${memoryPercent}%`, "WARNING");
+        }
+        
+        // Мониторинг ошибок
+        if (botStats.failedAudio > 0 && botStats.failedAudio > botStats.successfulAudio * 0.1) {
+          sendAlert(`Высокий процент ошибок: ${((botStats.failedAudio / (botStats.successfulAudio + botStats.failedAudio)) * 100).toFixed(1)}%`, "WARNING");
+        }
+
+        // Мониторинг очереди
+        if (processingQueue.size > 5) {
+          sendAlert(`Большая очередь обработки: ${processingQueue.size} запросов`, "WARNING");
+        }
+
+        // Мониторинг файловой системы
+        this.monitorFileSystem();
+      } catch (error) {
+        console.error("Monitoring error:", error);
+      }
+    }, 5 * 60 * 1000); // Каждые 5 минут
+  },
+
+  monitorFileSystem: function() {
+    try {
+      const tempSize = getFolderSize(TEMP_FOLDER);
+      if (tempSize > 1000) { // 1GB
+        sendAlert(`Большой размер temp папки: ${tempSize}MB`, "WARNING");
+      }
+    } catch (error) {
+      console.error("File system monitoring error:", error);
+    }
+  }
+};
+
 // --- КЭШИРОВАНИЕ ---
 function getCacheKey(type, surah, ayah) {
   try {
@@ -195,11 +386,6 @@ async function getCachedTranslation(surah, ayah) {
 function validateSurahAndAyah(surah, ayah) {
   try {
     if (surah < 1 || surah > 114) return false;
-
-    // const surahInfo = surahs[surah - 1];
-    // if (!surahInfo) return false;
-
-    // return ayah >= 1 && ayah <= surahInfo.ayahs;
     return true;
   } catch (error) {
     console.error("Error in validateSurahAndAyah:", error);
@@ -283,15 +469,54 @@ const backupManager = {
     } catch (error) {
       console.error("Error in restoreBackup:", error);
     }
-  },
+  }
+};
+
+// Система бэкапа конфигурации
+const configBackup = {
+  createBackup: () => {
+    try {
+      const backup = {
+        config,
+        featureFlags,
+        timestamp: new Date().toISOString(),
+        version: process.env.npm_package_version || "1.0.0"
+      };
+      
+      const backupPath = path.join(BACKUP_FOLDER, `config_${Date.now()}.json`);
+      fs.writeFileSync(backupPath, JSON.stringify(backup, null, 2));
+      logger.info("Config backup created");
+    } catch (error) {
+      console.error("Config backup error:", error);
+    }
+  }
 };
 
 // Автобэкап каждые 24 часа
 try {
-  setInterval(() => backupManager.createBackup(), 24 * 60 * 60 * 1000);
+  setInterval(() => {
+    backupManager.createBackup();
+    configBackup.createBackup();
+  }, 24 * 60 * 60 * 1000);
 } catch (error) {
   console.error("Error setting up backup interval:", error);
 }
+
+// Система восстановления после сбоев
+const recoveryManager = {
+  async recoverFromCrash() {
+    try {
+      // Проверяем незавершенные процессы
+      const tempFiles = fs.readdirSync(TEMP_FOLDER);
+      if (tempFiles.length > 0) {
+        logger.warn(`Found ${tempFiles.length} temp files from previous session`);
+        clearTempFolder();
+      }
+    } catch (error) {
+      logger.error("Recovery failed:", error);
+    }
+  }
+};
 
 // Глобальные данные (теперь для каждого пользователя отдельно)
 const userSessions = new Map();
@@ -315,7 +540,6 @@ function getUserData(userId) {
     return userSessions.get(userId);
   } catch (error) {
     console.error("Error in getUserData:", error);
-    // Возвращаем пустой объект в случае ошибки
     return {
       track: "",
       text: "",
@@ -466,6 +690,18 @@ bot.use(async (ctx, next) => {
     const userId = ctx.from?.id;
     const username = ctx.from?.username || "без username";
     const firstName = ctx.from?.first_name || "без имени";
+
+    // Проверка лимитов
+    if (userId) {
+      const limitCheck = checkRateLimit(userId);
+      if (!limitCheck.allowed) {
+        if (limitCheck.reason === "minute_limit") {
+          return ctx.reply(messageTemplates.error("rateLimit"));
+        } else {
+          return ctx.reply("⏳ Превышен часовой лимит запросов. Попробуйте через час.");
+        }
+      }
+    }
 
     botStats.totalRequests++;
     if (userId) botStats.users.add(userId);
@@ -735,21 +971,14 @@ _${translation}_
 // --- КОМАНДЫ ---
 bot.start((ctx) => {
   try {
-    ctx.reply(
-      "Ассалямуалейкум!\n\n" +
-        "Основные команды:\n" +
-        "/surah <номер> - выбрать суру\n" +
-        "/help - полная справка\n\n" +
-        "Как использовать:\n" +
-        "1. Выберите суру: /surah 1\n" +
-        "2. Отправьте номера аятов: 1-5, 7, 10",
-      {
-        reply_markup: {
-          keyboard: [["📖 Выбрать суру"]],
-          resize_keyboard: true,
-        },
+    const name = ctx.from.first_name || "друг";
+    ctx.reply(messageTemplates.welcome(name), {
+      parse_mode: "Markdown",
+      reply_markup: {
+        keyboard: [["📖 Выбрать суру"]],
+        resize_keyboard: true,
       }
-    );
+    });
   } catch (error) {
     console.error("Error in start command:", error);
   }
@@ -775,6 +1004,7 @@ ${
 <b>/delete_audio &lt;номер&gt;</b> — Удалить аудиозапись по номеру из списка.
 <b>/colors</b> — Показать значение цветов.
 <b>/stats</b> — Статистика бота.
+<b>/popular</b> — Статистика популярных запросов.
 `
     : ""
 }
@@ -876,6 +1106,8 @@ bot.command("stats", (ctx) => {
 ✅ Успешных аудио: ${botStats.successfulAudio}
 ❌ Ошибок: ${botStats.failedAudio}
 💾 Размер temp: ${getFolderSize(TEMP_FOLDER)} MB
+📊 Активных сессий: ${userSessions.size}
+⏳ В очереди: ${processingQueue.size}
 🕐 Аптайм: ${Math.floor(process.uptime() / 60)} минут
   `;
 
@@ -883,6 +1115,31 @@ bot.command("stats", (ctx) => {
   } catch (error) {
     console.error("Error in stats command:", error);
     ctx.reply("Ошибка при получении статистики.");
+  }
+});
+
+// --- КОМАНДА ПОПУЛЯРНЫХ ЗАПРОСОВ (ТОЛЬКО ДЛЯ АДМИНА) ---
+bot.command("popular", (ctx) => {
+  try {
+    if (!isAdmin(ctx.from.id)) return;
+
+    const stats = popularRequests.getStats();
+    let message = "📈 *Популярные запросы:*\n\n";
+    
+    message += "*Топ сур:*\n";
+    stats.topSurahs.forEach(([surahId, count], index) => {
+      const surah = surahs[surahId - 1];
+      message += `${index + 1}. ${surahId} - ${surah?.name_ru || 'Unknown'}: ${count} запросов\n`;
+    });
+    
+    message += `\n*Типы запросов:*\n`;
+    message += `Одиночные аяты: ${stats.rangeStats.single || 0}\n`;
+    message += `Несколько аятов: ${stats.rangeStats.multiple || 0}`;
+
+    ctx.reply(message, { parse_mode: "Markdown" });
+  } catch (error) {
+    console.error("Error in popular command:", error);
+    ctx.reply("Ошибка при получении статистики популярных запросов.");
   }
 });
 
@@ -970,35 +1227,6 @@ bot.command("delete_audio", (ctx) => {
   }
 });
 
-// --- ИНЛАЙН-ПОИСК СУР ---
-// bot.on("inline_query", async (ctx) => {
-//   try {
-//     const query = ctx.inlineQuery.query.toLowerCase();
-
-//     const results = surahs
-//       .filter(
-//         (surah) =>
-//           surah.name_ru.toLowerCase().includes(query) ||
-//           surah.name_en.toLowerCase().includes(query) ||
-//           surah.name_ar.includes(query)
-//       )
-//       .slice(0, 10)
-//       .map((surah, idx) => ({
-//         type: "article",
-//         id: idx.toString(),
-//         title: `${surah.name_ru} (${surah.name_ar})`,
-//         description: `Аятов: ${surah.ayahs}`,
-//         input_message_content: {
-//           message_text: `Выбрана сура ${surah.id} - ${surah.name_ru}`,
-//         },
-//       }));
-
-//     ctx.answerInlineQuery(results);
-//   } catch (error) {
-//     console.error("Error in inline_query:", error);
-//   }
-// });
-
 // --- ОБРАБОТКА ТЕКСТА С ОЧЕРЕДЬЮ ---
 bot.on("text", async (ctx) => {
   if (ctx.message.text.startsWith("/")) {
@@ -1043,11 +1271,8 @@ bot.on("text", async (ctx) => {
         if (!ayahs || ayahs.includes(0))
           return ctx.reply("Некорректно указаны номера аятов.");
 
-        // Валидация аятов
-        // const maxAyah = Math.max(...ayahs);
-        // if (!validateSurahAndAyah(parseInt(userData.track))) {
-        //   return ctx.reply("❌ Указанные аяты не существуют в этой суре.");
-        // }
+        // Обновляем статистику популярных запросов
+        popularRequests.update(userData.track, ayahs);
 
         const tempMsg = await ctx.reply("Обработка аудио...");
 
@@ -1088,7 +1313,7 @@ bot.on("text", async (ctx) => {
       return ctx.reply(err.message);
     }
     logger.error(`Text handler error: ${err.message}`);
-    ctx.reply("Ошибка при обработке аудио.");
+    ctx.reply(messageTemplates.error("processing"));
     clearTempFolder();
   }
 });
@@ -1331,33 +1556,6 @@ bot.action("cancel_audio", async (ctx) => {
   }
 });
 
-// --- HEALTH CHECK СЕРВЕР ---
-// const app = express();
-// app.get("/health", (req, res) => {
-//   try {
-//     res.json({
-//       status: "ok",
-//       uptime: process.uptime(),
-//       memory: process.memoryUsage(),
-//       timestamp: new Date().toISOString(),
-//       users: botStats.users.size,
-//       requests: botStats.totalRequests,
-//     });
-//   } catch (error) {
-//     console.error("Error in health check:", error);
-//     res.status(500).json({ status: "error", error: error.message });
-//   }
-// });
-
-// const HEALTH_PORT = process.env.HEALTH_PORT || 3000;
-// try {
-//   app.listen(HEALTH_PORT, () => {
-//     logger.info(`Health check server running on port ${HEALTH_PORT}`);
-//   });
-// } catch (error) {
-//   console.error("Error starting health check server:", error);
-// }
-
 // --- ОЧИСТКА СТАРЫХ СЕССИЙ ---
 try {
   setInterval(() => {
@@ -1368,6 +1566,17 @@ try {
       for (const [userId, data] of userSessions.entries()) {
         // Если у данных есть timestamp, можно добавить проверку на возраст
         // Пока просто оставляем очистку на будущее
+      }
+
+      // Очистка старых лимитов
+      for (const [userId, limits] of userLimits.entries()) {
+        const now = Date.now();
+        limits.minute = limits.minute.filter(time => now - time < 60000);
+        limits.hour = limits.hour.filter(time => now - time < 3600000);
+        
+        if (limits.minute.length === 0 && limits.hour.length === 0) {
+          userLimits.delete(userId);
+        }
       }
     } catch (error) {
       console.error("Error in session cleanup:", error);
@@ -1383,7 +1592,9 @@ try {
     .launch()
     .then(() => {
       logger.info("Бот успешно запущен!");
-      // logger.info(`Health check доступен на порту ${HEALTH_PORT}`);
+      monitorSystem.start();
+      recoveryManager.recoverFromCrash();
+      logger.info("Все системы мониторинга запущены");
     })
     .catch((err) => logger.error(`Bot launch error: ${err.message}`));
 } catch (error) {
@@ -1405,4 +1616,3 @@ process.once("SIGTERM", () => {
     console.error("Error during SIGTERM handling:", error);
   }
 });
-// --- УТИЛИТА ДЛЯ ОЧИСТКИ ВРЕМЕННОЙ ПАПКИ ---
