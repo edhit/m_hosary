@@ -1310,7 +1310,7 @@ bot.start((ctx) => {
   try {
     const name = ctx.from.first_name || "друг";
     ctx.reply(messageTemplates.welcome(name), {
-      parse_mode: "Markdown",
+      //parse_mode: "Markdown",
       reply_markup: {
         keyboard: [["📖 Выбрать суру"]],
         resize_keyboard: true,
