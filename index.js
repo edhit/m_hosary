@@ -7,6 +7,7 @@ const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
 const winston = require("winston");
 // const express = require("express");
+// const Redis = require('ioredis'); // Раскомментировать если нужен Redis
 
 const surahs = require("./quran.json");
 const { mp3create } = require("./mp3create");
@@ -40,14 +41,18 @@ const config = {
     requestsPerMinute: parseInt(process.env.REQUESTS_PER_MINUTE) || 10,
     requestsPerHour: parseInt(process.env.REQUESTS_PER_HOUR) || 50,
     maxAyahsPerRequest: parseInt(process.env.MAX_AYAHS_PER_REQUEST) || 50,
-  }
+  },
+  batchSize: parseInt(process.env.BATCH_SIZE) || 5,
+  maxConcurrentProcesses: parseInt(process.env.MAX_CONCURRENT_PROCESSES) || 3,
+  memoryCleanupInterval: parseInt(process.env.MEMORY_CLEANUP_INTERVAL) || 10 * 60 * 1000, // 10 минут
 };
 
-// Настройка логирования
+// Расширенная система логирования
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || "info",
   format: winston.format.combine(
     winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
     winston.format.json()
   ),
   transports: [
@@ -67,6 +72,11 @@ const logger = winston.createLogger({
       filename: "logs/combined.log",
       maxsize: 10485760,
       maxFiles: 5
+    }),
+    new winston.transports.File({ 
+      filename: "logs/analytics.log",
+      maxsize: 10485760,
+      maxFiles: 3
     })
   ],
 });
@@ -80,6 +90,8 @@ const botStats = {
   successfulAudio: 0,
   failedAudio: 0,
   users: new Set(),
+  cacheHits: 0,
+  cacheMisses: 0,
 };
 
 // Кэширование
@@ -158,7 +170,9 @@ _Чтение Корана - благословенное дело!_ 🕋
       validation: "❌ Некорректные данные. Проверьте номер суры и аятов.",
       timeout: "⏰ Время обработки истекло. Попробуйте снова.",
       general: "❌ Произошла ошибка. Мы уже работаем над исправлением.",
-      rateLimit: "⏳ Слишком много запросов. Пожалуйста, подождите."
+      rateLimit: "⏳ Слишком много запросов. Пожалуйста, подождите.",
+      fileTooLarge: "📁 Файл слишком большой. Попробуйте меньше аятов.",
+      network: "🌐 Проблемы с сетью. Попробуйте позже."
     };
     return errors[type] || errors.general;
   }
@@ -168,7 +182,350 @@ _Чтение Корана - благословенное дело!_ 🕋
 const featureFlags = {
   newAudioEngine: process.env.FF_NEW_AUDIO === 'true',
   enhancedTafsir: process.env.FF_ENHANCED_TAFSIR === 'true',
-  voiceMessages: process.env.FF_VOICE_MESSAGES === 'true'
+  voiceMessages: process.env.FF_VOICE_MESSAGES === 'true',
+  analytics: process.env.FF_ANALYTICS === 'true',
+  qualityCheck: process.env.FF_QUALITY_CHECK === 'true'
+};
+
+// Система управления конфигурацией
+class ConfigManager {
+  constructor() {
+    this.config = { ...config };
+    this.watchers = new Map();
+  }
+  
+  updateConfig(newConfig) {
+    this.config = { ...this.config, ...newConfig };
+    this.notifyWatchers();
+    logger.info('Configuration updated', { newConfig });
+  }
+  
+  watch(key, callback) {
+    if (!this.watchers.has(key)) {
+      this.watchers.set(key, new Set());
+    }
+    this.watchers.get(key).add(callback);
+  }
+  
+  notifyWatchers() {
+    for (const [key, callbacks] of this.watchers) {
+      if (key in this.config) {
+        callbacks.forEach(callback => callback(this.config[key]));
+      }
+    }
+  }
+  
+  reloadFromEnv() {
+    this.updateConfig({
+      maxAyahs: parseInt(process.env.MAX_AYAHS) || 20,
+      userLimits: {
+        requestsPerMinute: parseInt(process.env.REQUESTS_PER_MINUTE) || 10,
+        requestsPerHour: parseInt(process.env.REQUESTS_PER_HOUR) || 50,
+      }
+    });
+  }
+}
+
+const configManager = new ConfigManager();
+
+// Система аналитики
+const analytics = {
+  trackEvent: function(userId, eventType, metadata = {}) {
+    try {
+      if (!featureFlags.analytics) return;
+      
+      const event = {
+        userId,
+        eventType,
+        timestamp: new Date().toISOString(),
+        ...metadata
+      };
+      
+      // Сохранение в файл
+      const analyticsFile = path.join(__dirname, 'logs', 'analytics.log');
+      fs.appendFileSync(analyticsFile, JSON.stringify(event) + '\n');
+      
+    } catch (error) {
+      console.error('Analytics tracking error:', error);
+    }
+  },
+
+  getConversionRate: function() {
+    const total = botStats.successfulAudio + botStats.failedAudio;
+    return total > 0 ? (botStats.successfulAudio / total * 100).toFixed(1) : 0;
+  },
+
+  getCacheEfficiency: function() {
+    const total = botStats.cacheHits + botStats.cacheMisses;
+    return total > 0 ? (botStats.cacheHits / total * 100).toFixed(1) : 0;
+  }
+};
+
+// Система управления памятью
+const memoryManager = {
+  cleanup: function() {
+    try {
+      // Принудительный сбор мусора (если доступен)
+      if (global.gc) {
+        global.gc();
+      }
+      
+      // Очистка старых кэшей
+      const now = Date.now();
+      let clearedCacheItems = 0;
+      for (const [key, value] of cache.entries()) {
+        if (now - value.timestamp > CACHE_TTL) {
+          cache.delete(key);
+          clearedCacheItems++;
+        }
+      }
+      
+      // Очистка старых сессий
+      const SESSION_MAX_AGE = 24 * 60 * 60 * 1000; // 24 часа
+      let clearedSessions = 0;
+      for (const [userId, session] of userSessions.entries()) {
+        if (now - (session.lastActivity || 0) > SESSION_MAX_AGE) {
+          userSessions.delete(userId);
+          clearedSessions++;
+        }
+      }
+      
+      logger.info(`Memory cleanup completed. Cache: ${clearedCacheItems} items, Sessions: ${clearedSessions} sessions`);
+    } catch (error) {
+      logger.error("Memory cleanup error:", error);
+    }
+  }
+};
+
+// Система ретраев с экспоненциальной задержкой
+async function retryWithBackoff(operation, maxRetries = 3, baseDelay = 1000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt === maxRetries) throw error;
+      
+      const delay = baseDelay * Math.pow(2, attempt - 1);
+      const jitter = delay * 0.1 * Math.random();
+      
+      logger.warn(`Retry attempt ${attempt} after ${Math.round(delay + jitter)}ms`);
+      await new Promise(resolve => setTimeout(resolve, delay + jitter));
+    }
+  }
+}
+
+// Система проверки качества аудио
+const audioQuality = {
+  validateFile: async function(filePath) {
+    return new Promise((resolve) => {
+      try {
+        const stats = fs.statSync(filePath);
+        
+        // Проверка размера файла
+        if (stats.size === 0) {
+          resolve({ valid: false, reason: 'empty_file' });
+          return;
+        }
+        
+        if (stats.size > config.maxFileSize) {
+          resolve({ valid: false, reason: 'file_too_large' });
+          return;
+        }
+        
+        // Проверка продолжительности через ffmpeg
+        ffmpeg.ffprobe(filePath, (err, metadata) => {
+          if (err) {
+            resolve({ valid: false, reason: 'corrupted_file' });
+            return;
+          }
+          
+          const duration = metadata.format.duration;
+          if (!duration || duration < 0.1) {
+            resolve({ valid: false, reason: 'invalid_duration' });
+            return;
+          }
+          
+          resolve({ valid: true, duration, size: stats.size });
+        });
+      } catch (error) {
+        resolve({ valid: false, reason: 'file_error' });
+      }
+    });
+  }
+};
+
+// Система уведомлений
+const notifications = {
+  sendToUser: async function(userId, message, options = {}) {
+    try {
+      await bot.telegram.sendMessage(userId, message, {
+        parse_mode: 'Markdown',
+        ...options
+      });
+      return true;
+    } catch (error) {
+      if (error.response?.error_code === 403) {
+        logger.warn(`User ${userId} blocked the bot`);
+        // Удаляем пользователя из статистики
+        botStats.users.delete(userId);
+      }
+      return false;
+    }
+  }
+};
+
+// Система A/B тестирования
+const abTesting = {
+  experiments: new Map(),
+  
+  createExperiment: function(name, variants, weights = []) {
+    this.experiments.set(name, {
+      variants,
+      weights: weights.length === variants.length ? weights : Array(variants.length).fill(1/variants.length),
+      participants: new Map()
+    });
+  },
+  
+  getVariant: function(userId, experimentName) {
+    const experiment = this.experiments.get(experimentName);
+    if (!experiment) return null;
+    
+    if (experiment.participants.has(userId)) {
+      return experiment.participants.get(userId);
+    }
+    
+    // Распределение по вариантам с учетом весов
+    const random = Math.random();
+    let sum = 0;
+    let selectedVariant = experiment.variants[0];
+    
+    for (let i = 0; i < experiment.weights.length; i++) {
+      sum += experiment.weights[i];
+      if (random <= sum) {
+        selectedVariant = experiment.variants[i];
+        break;
+      }
+    }
+    
+    experiment.participants.set(userId, selectedVariant);
+    return selectedVariant;
+  }
+};
+
+// Система плагинов
+class PluginSystem {
+  constructor() {
+    this.plugins = new Map();
+    this.hooks = new Map();
+  }
+  
+  registerPlugin(name, plugin) {
+    this.plugins.set(name, plugin);
+    
+    if (plugin.hooks) {
+      for (const [hookName, hookFn] of Object.entries(plugin.hooks)) {
+        this.registerHook(hookName, hookFn);
+      }
+    }
+    
+    logger.info(`Plugin registered: ${name}`);
+  }
+  
+  registerHook(hookName, hookFn) {
+    if (!this.hooks.has(hookName)) {
+      this.hooks.set(hookName, []);
+    }
+    this.hooks.get(hookName).push(hookFn);
+  }
+  
+  async executeHook(hookName, ...args) {
+    if (!this.hooks.has(hookName)) return;
+    
+    for (const hookFn of this.hooks.get(hookName)) {
+      try {
+        await hookFn(...args);
+      } catch (error) {
+        logger.error(`Plugin hook error (${hookName}):`, error);
+      }
+    }
+  }
+}
+
+const pluginSystem = new PluginSystem();
+
+// Пример плагина для улучшения аудио
+const audioEnhancementPlugin = {
+  hooks: {
+    'before_audio_create': async (settings) => {
+      logger.info('Audio enhancement plugin: processing settings', { settings });
+    },
+    
+    'after_audio_create': async (audioPath, settings) => {
+      if (featureFlags.qualityCheck) {
+        const qualityCheck = await audioQuality.validateFile(audioPath);
+        if (!qualityCheck.valid) {
+          logger.warn('Audio quality check failed', { audioPath, reason: qualityCheck.reason });
+        }
+      }
+    }
+  }
+};
+
+pluginSystem.registerPlugin('audioEnhancement', audioEnhancementPlugin);
+
+// Система мониторинга и алертов
+async function sendAlert(message, level = "ERROR") {
+  try {
+    if (!ALERT_CHAT_ID) return;
+    
+    const alertMsg = `🚨 *${level}*\n${message}\n_${new Date().toISOString()}_`;
+    await bot.telegram.sendMessage(ALERT_CHAT_ID, alertMsg, { 
+      parse_mode: "Markdown" 
+    });
+  } catch (error) {
+    console.error("Alert sending failed:", error);
+  }
+}
+
+const monitorSystem = {
+  start: function() {
+    setInterval(() => {
+      try {
+        const memoryUsage = process.memoryUsage();
+        const memoryPercent = (memoryUsage.heapUsed / memoryUsage.heapTotal * 100).toFixed(2);
+        
+        if (memoryPercent > 80) {
+          sendAlert(`Высокое использование памяти: ${memoryPercent}%`, "WARNING");
+        }
+        
+        // Мониторинг ошибок
+        if (botStats.failedAudio > 0 && botStats.failedAudio > botStats.successfulAudio * 0.1) {
+          sendAlert(`Высокий процент ошибок: ${((botStats.failedAudio / (botStats.successfulAudio + botStats.failedAudio)) * 100).toFixed(1)}%`, "WARNING");
+        }
+
+        // Мониторинг очереди
+        if (processingQueue.size > 5) {
+          sendAlert(`Большая очередь обработки: ${processingQueue.size} запросов`, "WARNING");
+        }
+
+        // Мониторинг файловой системы
+        this.monitorFileSystem();
+      } catch (error) {
+        console.error("Monitoring error:", error);
+      }
+    }, 5 * 60 * 1000); // Каждые 5 минут
+  },
+
+  monitorFileSystem: function() {
+    try {
+      const tempSize = getFolderSize(TEMP_FOLDER);
+      if (tempSize > 1000) { // 1GB
+        sendAlert(`Большой размер temp папки: ${tempSize}MB`, "WARNING");
+      }
+    } catch (error) {
+      console.error("File system monitoring error:", error);
+    }
+  }
 };
 
 // Создание необходимых папок
@@ -183,10 +540,12 @@ try {
 // --- ГЛОБАЛЬНЫЕ ОБРАБОТЧИКИ ОШИБОК ---
 process.on("unhandledRejection", (reason, promise) => {
   logger.error("Unhandled Rejection at:", promise, "reason:", reason);
+  sendAlert(`Unhandled Rejection: ${reason}`, "CRITICAL");
 });
 
 process.on("uncaughtException", (error) => {
   logger.error("Uncaught Exception:", error);
+  sendAlert(`Uncaught Exception: ${error.message}`, "CRITICAL");
   process.exit(1);
 });
 
@@ -281,61 +640,6 @@ function checkRateLimit(userId) {
   }
 }
 
-// --- СИСТЕМА МОНИТОРИНГА И АЛЕРТОВ ---
-async function sendAlert(message, level = "ERROR") {
-  try {
-    if (!ALERT_CHAT_ID) return;
-    
-    const alertMsg = `🚨 *${level}*\n${message}\n_${new Date().toISOString()}_`;
-    await bot.telegram.sendMessage(ALERT_CHAT_ID, alertMsg, { 
-      parse_mode: "Markdown" 
-    });
-  } catch (error) {
-    console.error("Alert sending failed:", error);
-  }
-}
-
-const monitorSystem = {
-  start: function() {
-    setInterval(() => {
-      try {
-        const memoryUsage = process.memoryUsage();
-        const memoryPercent = (memoryUsage.heapUsed / memoryUsage.heapTotal * 100).toFixed(2);
-        
-        if (memoryPercent > 80) {
-          sendAlert(`Высокое использование памяти: ${memoryPercent}%`, "WARNING");
-        }
-        
-        // Мониторинг ошибок
-        if (botStats.failedAudio > 0 && botStats.failedAudio > botStats.successfulAudio * 0.1) {
-          sendAlert(`Высокий процент ошибок: ${((botStats.failedAudio / (botStats.successfulAudio + botStats.failedAudio)) * 100).toFixed(1)}%`, "WARNING");
-        }
-
-        // Мониторинг очереди
-        if (processingQueue.size > 5) {
-          sendAlert(`Большая очередь обработки: ${processingQueue.size} запросов`, "WARNING");
-        }
-
-        // Мониторинг файловой системы
-        this.monitorFileSystem();
-      } catch (error) {
-        console.error("Monitoring error:", error);
-      }
-    }, 5 * 60 * 1000); // Каждые 5 минут
-  },
-
-  monitorFileSystem: function() {
-    try {
-      const tempSize = getFolderSize(TEMP_FOLDER);
-      if (tempSize > 1000) { // 1GB
-        sendAlert(`Большой размер temp папки: ${tempSize}MB`, "WARNING");
-      }
-    } catch (error) {
-      console.error("File system monitoring error:", error);
-    }
-  }
-};
-
 // --- КЭШИРОВАНИЕ ---
 function getCacheKey(type, surah, ayah) {
   try {
@@ -352,9 +656,11 @@ async function getCachedTafsir(surah, ayah) {
     const cached = cache.get(key);
 
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      botStats.cacheHits++;
       return cached.data;
     }
 
+    botStats.cacheMisses++;
     const data = await getTafsir(surah, ayah);
     cache.set(key, { data, timestamp: Date.now() });
     return data;
@@ -370,9 +676,11 @@ async function getCachedTranslation(surah, ayah) {
     const cached = cache.get(key);
 
     if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      botStats.cacheHits++;
       return cached.data;
     }
 
+    botStats.cacheMisses++;
     const data = await getKulievTranslation(surah, ayah);
     cache.set(key, { data, timestamp: Date.now() });
     return data;
@@ -461,14 +769,6 @@ const backupManager = {
     } catch (err) {
       logger.error(`Backup error: ${err.message}`);
     }
-  },
-
-  restoreBackup: (filename) => {
-    try {
-      // Логика восстановления при необходимости
-    } catch (error) {
-      console.error("Error in restoreBackup:", error);
-    }
   }
 };
 
@@ -512,8 +812,19 @@ const recoveryManager = {
         logger.warn(`Found ${tempFiles.length} temp files from previous session`);
         clearTempFolder();
       }
+      
+      // Восстанавливаем статистику из файла если нужно
+      await this.restoreStats();
     } catch (error) {
       logger.error("Recovery failed:", error);
+    }
+  },
+  
+  async restoreStats() {
+    try {
+      // Логика восстановления статистики при необходимости
+    } catch (error) {
+      logger.error("Stats restoration failed:", error);
     }
   }
 };
@@ -535,7 +846,11 @@ function getUserData(userId) {
         tafsirParts: [],
         currentTafsirPage: 0,
         button: null,
+        lastActivity: Date.now()
       });
+    } else {
+      // Обновляем время последней активности
+      userSessions.get(userId).lastActivity = Date.now();
     }
     return userSessions.get(userId);
   } catch (error) {
@@ -550,6 +865,7 @@ function getUserData(userId) {
       tafsirParts: [],
       currentTafsirPage: 0,
       button: null,
+      lastActivity: Date.now()
     };
   }
 }
@@ -695,6 +1011,7 @@ bot.use(async (ctx, next) => {
     if (userId) {
       const limitCheck = checkRateLimit(userId);
       if (!limitCheck.allowed) {
+        analytics.trackEvent(userId, 'rate_limit_exceeded');
         if (limitCheck.reason === "minute_limit") {
           return ctx.reply(messageTemplates.error("rateLimit"));
         } else {
@@ -713,6 +1030,14 @@ bot.use(async (ctx, next) => {
     );
 
     await next();
+    
+    // Трекинг после успешной обработки
+    if (userId) {
+      analytics.trackEvent(userId, 'request_completed', {
+        command: ctx.message?.text,
+        chatType: ctx.chat?.type
+      });
+    }
   } catch (error) {
     console.error("Error in logging middleware:", error);
     await next();
@@ -734,8 +1059,21 @@ function writeID3(tags, path) {
 
 async function metaTags(tags, outputAudioPath, tempMsg, ctx, userData) {
   try {
+    await pluginSystem.executeHook('before_audio_create', tags);
+    
     await writeID3(tags, outputAudioPath);
     userData.audioPath = outputAudioPath;
+
+    // Проверка качества аудио
+    if (featureFlags.qualityCheck) {
+      const qualityCheck = await audioQuality.validateFile(outputAudioPath);
+      if (!qualityCheck.valid) {
+        logger.warn('Audio quality check failed', { 
+          path: outputAudioPath, 
+          reason: qualityCheck.reason 
+        });
+      }
+    }
 
     try {
       await ctx.deleteMessage(tempMsg.message_id);
@@ -794,6 +1132,7 @@ async function metaTags(tags, outputAudioPath, tempMsg, ctx, userData) {
     }
 
     botStats.successfulAudio++;
+    await pluginSystem.executeHook('after_audio_create', outputAudioPath, tags);
     return true;
   } catch (err) {
     console.error("metaTags error:", err);
@@ -979,6 +1318,7 @@ bot.start((ctx) => {
         resize_keyboard: true,
       }
     });
+    analytics.trackEvent(ctx.from.id, 'start_command');
   } catch (error) {
     console.error("Error in start command:", error);
   }
@@ -1005,6 +1345,7 @@ ${
 <b>/colors</b> — Показать значение цветов.
 <b>/stats</b> — Статистика бота.
 <b>/popular</b> — Статистика популярных запросов.
+<b>/reload_config</b> — Перезагрузить конфигурацию.
 `
     : ""
 }
@@ -1017,6 +1358,7 @@ ${
 Бот создаёт аудиофайлы из Корана в исполнении Махмуда Аль-Хусари.
   `;
     ctx.reply(helpMsg, { parse_mode: "HTML" });
+    analytics.trackEvent(ctx.from.id, 'help_command');
   } catch (error) {
     console.error("Error in help command:", error);
   }
@@ -1043,6 +1385,7 @@ _${surah.name_en}_
   `;
 
     ctx.reply(infoMsg, { parse_mode: "Markdown" });
+    analytics.trackEvent(ctx.from.id, 'surah_info', { surah: surahNum });
   } catch (error) {
     console.error("Error in surah_info command:", error);
     ctx.reply("Ошибка при получении информации о суре.");
@@ -1066,6 +1409,7 @@ bot.command("surah", (ctx) => {
 
     userData.track = surahNum;
     ctx.reply(`Выбрана сура ${surahNum}. Теперь отправьте номера аятов.`);
+    analytics.trackEvent(ctx.from.id, 'surah_selected', { surah: surahNum });
   } catch (error) {
     console.error("Error in surah command:", error);
     ctx.reply("Ошибка при выборе суры.");
@@ -1108,6 +1452,9 @@ bot.command("stats", (ctx) => {
 💾 Размер temp: ${getFolderSize(TEMP_FOLDER)} MB
 📊 Активных сессий: ${userSessions.size}
 ⏳ В очереди: ${processingQueue.size}
+🗂 Кэш: ${cache.size} записей
+🎯 Эффективность кэша: ${analytics.getCacheEfficiency()}%
+📈 Конверсия: ${analytics.getConversionRate()}%
 🕐 Аптайм: ${Math.floor(process.uptime() / 60)} минут
   `;
 
@@ -1140,6 +1487,21 @@ bot.command("popular", (ctx) => {
   } catch (error) {
     console.error("Error in popular command:", error);
     ctx.reply("Ошибка при получении статистики популярных запросов.");
+  }
+});
+
+// --- КОМАНДА ПЕРЕЗАГРУЗКИ КОНФИГУРАЦИИ (ТОЛЬКО ДЛЯ АДМИНА) ---
+bot.command("reload_config", (ctx) => {
+  try {
+    if (!isAdmin(ctx.from.id)) {
+      return ctx.reply("❌ Эта команда доступна только администратору.");
+    }
+
+    configManager.reloadFromEnv();
+    ctx.reply("✅ Конфигурация перезагружена из переменных окружения.");
+  } catch (error) {
+    console.error("Error in reload_config command:", error);
+    ctx.reply("❌ Ошибка при перезагрузке конфигурации.");
   }
 });
 
@@ -1280,7 +1642,14 @@ bot.on("text", async (ctx) => {
         await showProgress(ctx, tempMsg.message_id, 10);
 
         const settings = { ayahs, surah: parseInt(userData.track) };
-        const outputAudio = await mp3create(settings);
+        
+        // Используем систему ретраев
+        const outputAudio = await retryWithBackoff(
+          () => mp3create(settings),
+          3,
+          1000
+        );
+        
         const outputAudioPath = path.join(outputAudio.folder, outputAudio.file);
 
         await showProgress(ctx, tempMsg.message_id, 80);
@@ -1305,6 +1674,7 @@ bot.on("text", async (ctx) => {
         }
       } catch (error) {
         console.error("Error in text handler task:", error);
+        analytics.trackEvent(ctx.from.id, 'audio_creation_failed', { error: error.message });
         throw error;
       }
     });
@@ -1359,6 +1729,8 @@ bot.action(/color_(.+)/, async (ctx) => {
           : { reply_markup: { inline_keyboard: [] } }),
       }
     );
+    
+    analytics.trackEvent(ctx.from.id, 'color_selected', { color: colorAction });
   } catch (err) {
     logger.error(`Color action error: ${err.message}`);
     ctx.reply("Ошибка при выборе цвета.");
@@ -1412,6 +1784,12 @@ bot.action("send_audio", async (ctx) => {
       audioPath: "",
       message: "",
     });
+    
+    analytics.trackEvent(ctx.from.id, 'audio_sent_to_channel', {
+      surah: userData.track,
+      ayahs: userData.text,
+      color: userData.color
+    });
   } catch (err) {
     logger.error(`Send audio error: ${err.message}`);
     ctx.reply("Ошибка при отправке аудио.");
@@ -1426,6 +1804,7 @@ bot.action("show_translate", async (ctx) => {
     const ayah = Number(userData.text);
 
     await showTranslation(ctx, surah, ayah);
+    analytics.trackEvent(ctx.from.id, 'translation_viewed', { surah, ayah });
   } catch (error) {
     console.error("Error in show_translate action:", error);
     ctx.reply("Ошибка при показе перевода.");
@@ -1440,6 +1819,10 @@ bot.action("next_ayah", async (ctx) => {
 
     if (userData.text > 1) {
       await showTranslation(ctx, userData.track, userData.text);
+      analytics.trackEvent(ctx.from.id, 'next_ayah_navigation', {
+        surah: userData.track,
+        ayah: userData.text
+      });
     } else {
       await ctx.answerCbQuery("❌ Это первый аят суры");
     }
@@ -1457,6 +1840,10 @@ bot.action("prev_ayah", async (ctx) => {
 
     if (userData.text > 1) {
       await showTranslation(ctx, userData.track, userData.text);
+      analytics.trackEvent(ctx.from.id, 'prev_ayah_navigation', {
+        surah: userData.track,
+        ayah: userData.text
+      });
     } else {
       await ctx.answerCbQuery("❌ Это первый аят суры");
     }
@@ -1469,6 +1856,11 @@ bot.action("prev_ayah", async (ctx) => {
 bot.action("show_tafsir", async (ctx) => {
   try {
     await showTafsir(ctx);
+    const userData = getUserData(ctx.from.id);
+    analytics.trackEvent(ctx.from.id, 'tafsir_viewed', {
+      surah: userData.track,
+      ayah: userData.text
+    });
   } catch (error) {
     console.error("Error in show_tafsir action:", error);
     ctx.reply("Ошибка при показе тафсира.");
@@ -1478,6 +1870,11 @@ bot.action("show_tafsir", async (ctx) => {
 bot.action("show_tafsir_reply", async (ctx) => {
   try {
     await showTafsir(ctx, true);
+    const userData = getUserData(ctx.from.id);
+    analytics.trackEvent(ctx.from.id, 'tafsir_viewed_from_translation', {
+      surah: userData.track,
+      ayah: userData.text
+    });
   } catch (error) {
     console.error("Error in show_tafsir_reply action:", error);
     ctx.reply("Ошибка при показе тафсира.");
@@ -1533,6 +1930,11 @@ bot.action("tafsir_next", async (ctx) => {
       parse_mode: "Markdown",
       reply_markup: keyboard,
     });
+    
+    analytics.trackEvent(ctx.from.id, 'tafsir_pagination', {
+      page: userData.currentTafsirPage + 1,
+      total: userData.tafsirParts.length
+    });
   } catch (err) {
     console.error(err);
     await ctx.answerCbQuery("❌ Ошибка при загрузке тафсира.");
@@ -1550,13 +1952,14 @@ bot.action("cancel_audio", async (ctx) => {
       color: "",
       text: "",
     });
+    analytics.trackEvent(ctx.from.id, 'audio_cancelled');
   } catch (error) {
     console.error("Error in cancel_audio action:", error);
     ctx.reply("Ошибка при отмене отправки.");
   }
 });
 
-// --- ОЧИСТКА СТАРЫХ СЕССИЙ ---
+// --- ОЧИСТКА СТАРЫХ СЕССИЙ И ПАМЯТИ ---
 try {
   setInterval(() => {
     try {
@@ -1564,8 +1967,9 @@ try {
       const MAX_SESSION_AGE = config.sessionTimeout;
 
       for (const [userId, data] of userSessions.entries()) {
-        // Если у данных есть timestamp, можно добавить проверку на возраст
-        // Пока просто оставляем очистку на будущее
+        if (now - (data.lastActivity || 0) > MAX_SESSION_AGE) {
+          userSessions.delete(userId);
+        }
       }
 
       // Очистка старых лимитов
@@ -1586,6 +1990,12 @@ try {
   console.error("Error setting up session cleanup interval:", error);
 }
 
+// Запуск очистки памяти
+setInterval(() => memoryManager.cleanup(), config.memoryCleanupInterval);
+
+// Инициализация A/B тестов
+abTesting.createExperiment('button_layout', ['old', 'new'], [0.5, 0.5]);
+
 // --- ЗАПУСК БОТА ---
 try {
   bot
@@ -1594,15 +2004,30 @@ try {
       logger.info("Бот успешно запущен!");
       monitorSystem.start();
       recoveryManager.recoverFromCrash();
-      logger.info("Все системы мониторинга запущены");
+      logger.info("Все системы мониторинга и восстановления запущены");
+      
+      // Логирование информации о системе
+      logger.info("System initialized", {
+        featureFlags,
+        config: {
+          maxAyahs: config.maxAyahs,
+          userLimits: config.userLimits,
+          cacheTtl: config.cacheTtl
+        }
+      });
     })
-    .catch((err) => logger.error(`Bot launch error: ${err.message}`));
+    .catch((err) => {
+      logger.error(`Bot launch error: ${err.message}`);
+      sendAlert(`Ошибка запуска бота: ${err.message}`, "CRITICAL");
+    });
 } catch (error) {
   console.error("Error launching bot:", error);
+  sendAlert(`Критическая ошибка при запуске: ${error.message}`, "CRITICAL");
 }
 
 process.once("SIGINT", () => {
   try {
+    logger.info("Received SIGINT, shutting down gracefully");
     bot.stop("SIGINT");
   } catch (error) {
     console.error("Error during SIGINT handling:", error);
@@ -1611,6 +2036,7 @@ process.once("SIGINT", () => {
 
 process.once("SIGTERM", () => {
   try {
+    logger.info("Received SIGTERM, shutting down gracefully");
     bot.stop("SIGTERM");
   } catch (error) {
     console.error("Error during SIGTERM handling:", error);
