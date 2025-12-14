@@ -2319,7 +2319,6 @@ _${translationResult}_
   }
 });
 
-// Следующий аят
 // Обработчик перехода к следующему аяту из перевода
 bot.action("next_translation_ayah", async (ctx) => {
   try {
@@ -2364,6 +2363,29 @@ bot.action("prev_translation_ayah", async (ctx) => {
   } catch (error) {
     logger.error("Error in prev_translation_ayah action:", error);
     ctx.answerCbQuery("❌ Ошибка перехода к предыдущему аяту.");
+  }
+});
+
+// Следующий аят
+bot.action(/next_ayah:(true|false)/, async (ctx) => {
+  try {
+    const flag = ctx.match[1] === "true"; // превращаем строку в boolean
+    const userData = getUserData(ctx.from.id);
+    userData.text = Number(userData.text) + 1;
+
+    if (userData.text >= 1) {
+      await showTranslation(ctx, userData.track, userData.text, flag);
+      analytics.trackEvent(ctx.from.id, "next_ayah_navigation", {
+        surah: userData.track,
+        ayah: userData.text,
+        // showTranslation: flag
+      });
+    } else {
+      await ctx.answerCbQuery("❌ Это первый аят суры");
+    }
+  } catch (error) {
+    logger.error("Error in next_ayah action:", error);
+    ctx.reply("Ошибка при переходе к следующему аяту.");
   }
 });
 
