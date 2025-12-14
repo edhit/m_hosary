@@ -871,6 +871,7 @@ function getNavigationKeyboard(surah, ayah, tafsir = true) {
 async function showTranslation(ctx, surah, ayah, reply = false) {
   try {
     await ctx.answerCbQuery("Загружаю перевод...");
+    const userData = getUserData(ctx.from.id);
     const surahInfo = surahs[surah - 1] || {};
 
     if (reply) {
@@ -885,20 +886,46 @@ async function showTranslation(ctx, surah, ayah, reply = false) {
     }
 
     // Получаем перевод и фото параллельно
-    let [translation, photoFileId] = await Promise.allSettled([
+    let [translationResult, photoFileId] = await Promise.allSettled([
       getCachedTranslation(surah, ayah),
       getAyahPhoto(surah, ayah),
     ]);
 
     // Обрабатываем результаты
     let translationText = "";
-    if (translation.status === "fulfilled") {
-      translationText = translation.value;
+    if (translationResult.status === "fulfilled") {
+      translationText = translationResult.value;
     } else {
-      logger.error("Ошибка getCachedTranslation:", translation.reason);
+      logger.error("Ошибка getCachedTranslation:", translationResult.reason);
       translationText = "⚠️ Ошибка загрузки перевода.";
     }
 
+    // Сохраняем полный перевод в сессии
+    userData.fullTranslation = translationText;
+
+    // Берем первые 512 символов для первого сообщения
+    const maxFirstPartLength = 512;
+    let firstPart = translationText;
+    let hasMore = false;
+
+    if (translationText.length > maxFirstPartLength) {
+      // Ищем хорошее место для обрыва (после точки, запятой или пробела)
+      let cutIndex = maxFirstPartLength;
+      for (
+        let i = maxFirstPartLength;
+        i > maxFirstPartLength - 100 && i > 0;
+        i--
+      ) {
+        if ([".", ",", ";", "!", "?", " "].includes(translationText[i])) {
+          cutIndex = i + 1;
+          break;
+        }
+      }
+      firstPart = translationText.substring(0, cutIndex) + "...";
+      hasMore = true;
+    }
+
+    // Формируем сообщение
     const message = `
 📕 *Перевод Абу Аделя*
 ━━━━━━━━━━━━━━━
@@ -906,11 +933,51 @@ async function showTranslation(ctx, surah, ayah, reply = false) {
 🔹 *Аят:* ${ayah}
 
 💬 *Перевод:*
-_${translationText}_
+_${firstPart}_
 `;
 
-    // Настраиваем клавиатуру навигации
-    const keyboard = getNavigationKeyboard(surah, ayah);
+    // Создаем клавиатуру
+    const keyboard = { inline_keyboard: [] };
+
+    // Кнопка "Показать продолжение перевода" если текст длинный
+    if (hasMore) {
+      keyboard.inline_keyboard.push([
+        {
+          text: "📖 Показать полный перевод",
+          callback_data: `show_translation_continue:${surah}:${ayah}`,
+        },
+      ]);
+    }
+
+    // Кнопки навигации по аятам
+    const ayahNavigation = [];
+
+    if (ayah > 1) {
+      ayahNavigation.push({
+        text: "⬅️ Пред.аят",
+        callback_data: `prev_translation_ayah`,
+      });
+    }
+
+    if (surahInfo && ayah < surahInfo.ayahs) {
+      ayahNavigation.push({
+        text: "След.аят ➡️",
+        callback_data: `next_translation_ayah`,
+      });
+    }
+
+    if (ayahNavigation.length > 0) {
+      keyboard.inline_keyboard.push(ayahNavigation);
+    }
+
+    // Кнопка прослушивания и перехода к тафсиру
+    keyboard.inline_keyboard.push([
+      { text: "🔈 Прослушать аят", callback_data: `color_🔈` },
+    ]);
+
+    keyboard.inline_keyboard.push([
+      { text: "📘 Перейти к тафсиру", callback_data: `show_tafsir_reply` },
+    ]);
 
     // Если есть фото, отправляем его
     if (photoFileId.status === "fulfilled" && photoFileId.value) {
@@ -974,19 +1041,17 @@ _${translationText}_
           `Photo not found for surah ${surah}, ayah ${ayah}:`,
           photoFileId.reason
         );
-      } else {
-        logger.warn(`No photo available for surah ${surah}, ayah ${ayah}`);
       }
     }
   } catch (err) {
     logger.error("Error in showTranslation:", err);
-    await ctx.answerCbQuery("❌ Ошибка.");
+    await ctx.answerCbQuery("❌ Ошибка загрузки перевода.");
 
     if (reply) {
-      await ctx.reply("Ошибка при загрузке перевода и фото. Попробуйте позже.");
+      await ctx.reply("Ошибка при загрузке перевода. Попробуйте позже.");
     } else {
       await ctx.editMessageText(
-        "Ошибка при загрузке перевода и фото. Попробуйте позже."
+        "Ошибка при загрузке перевода. Попробуйте позже."
       );
     }
   }
@@ -2034,6 +2099,11 @@ bot.action(/color_(.+)/, async (ctx) => {
       );
     }
 
+    userData.audioPath = await getValue(
+      toGlobalAyah(userData.track, parseInt(userData.text))
+    );
+    userData.text = userData.text.toString();
+
     const surahInfo = surahs[Number(userData.track) - 1] || {};
     userData.message = `${colorAction} Сура ${userData.track} «${
       surahInfo.name_en
@@ -2176,7 +2246,7 @@ bot.action("cancel_audio", async (ctx) => {
 // Показать перевод
 bot.action(/show_translate:(true|false)/, async (ctx) => {
   try {
-    const flag = ctx.match[1] === "true"; // превращаем строку в boolean
+    const flag = ctx.match[1] === "true";
     const userData = getUserData(ctx.from.id);
 
     const surah = Number(userData.track);
@@ -2187,7 +2257,6 @@ bot.action(/show_translate:(true|false)/, async (ctx) => {
     analytics.trackEvent(ctx.from.id, "translation_viewed", {
       surah,
       ayah,
-      // flag,
     });
   } catch (error) {
     logger.error("Error in show_translate action:", error);
@@ -2195,26 +2264,106 @@ bot.action(/show_translate:(true|false)/, async (ctx) => {
   }
 });
 
-// Следующий аят
-bot.action(/next_ayah:(true|false)/, async (ctx) => {
+// Обработчик для показа продолжения перевода
+bot.action(/show_translation_continue:(\d+):(\d+)/, async (ctx) => {
   try {
-    const flag = ctx.match[1] === "true"; // превращаем строку в boolean
+    const surah = parseInt(ctx.match[1]);
+    const ayah = parseInt(ctx.match[2]);
     const userData = getUserData(ctx.from.id);
-    userData.text = Number(userData.text) + 1;
 
-    if (userData.text >= 1) {
-      await showTranslation(ctx, userData.track, userData.text, flag);
-      analytics.trackEvent(ctx.from.id, "next_ayah_navigation", {
-        surah: userData.track,
-        ayah: userData.text,
-        // showTranslation: flag
-      });
-    } else {
-      await ctx.answerCbQuery("❌ Это первый аят суры");
-    }
+    await ctx.answerCbQuery("Загружаю продолжение...");
+    await ctx.editMessageReplyMarkup(); // Убираем кнопку
+
+    // Получаем полный перевод
+    let translationResult = await getCachedTranslation(surah, ayah);
+    const surahInfo = surahs[surah - 1] || {};
+
+    // Формируем полное сообщение
+    const fullMessage = `
+📕 *Перевод Абу Аделя (полный текст)*
+━━━━━━━━━━━━━━━
+🕋 *Сура:* ${surah} ${surahInfo.name_ru}
+🔹 *Аят:* ${ayah}
+
+💬 *Полный перевод:*
+_${translationResult}_
+    `;
+
+    // Отправляем полный перевод как новое сообщение
+    await ctx.reply(fullMessage, {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "⬅️ Пред.аят", callback_data: `prev_translation_ayah` },
+            { text: "След.аят ➡️", callback_data: `next_translation_ayah` },
+          ],
+          [{ text: "🔈 Прослушать аят", callback_data: `color_🔈` }],
+          [
+            {
+              text: "📘 Перейти к тафсиру",
+              callback_data: `show_tafsir_reply`,
+            },
+          ],
+        ],
+      },
+    });
+
+    analytics.trackEvent(ctx.from.id, "translation_continue_viewed", {
+      surah,
+      ayah,
+    });
   } catch (error) {
-    logger.error("Error in next_ayah action:", error);
-    ctx.reply("Ошибка при переходе к следующему аяту.");
+    logger.error("Error in show_translation_continue action:", error);
+    ctx.answerCbQuery("❌ Ошибка загрузки продолжения.");
+  }
+});
+
+// Следующий аят
+// Обработчик перехода к следующему аяту из перевода
+bot.action("next_translation_ayah", async (ctx) => {
+  try {
+    const userData = getUserData(ctx.from.id);
+    const nextAyah = Number(userData.text) + 1;
+    const surahInfo = surahs[userData.track - 1];
+
+    if (!surahInfo || nextAyah > surahInfo.ayahs) {
+      return ctx.answerCbQuery("❌ Это последний аят суры");
+    }
+
+    userData.text = nextAyah;
+    await showTranslation(ctx, userData.track, nextAyah, false);
+
+    analytics.trackEvent(ctx.from.id, "next_ayah_from_translation", {
+      surah: userData.track,
+      ayah: nextAyah,
+    });
+  } catch (error) {
+    logger.error("Error in next_translation_ayah action:", error);
+    ctx.answerCbQuery("❌ Ошибка перехода к следующему аяту.");
+  }
+});
+
+// Обработчик перехода к предыдущему аяту из перевода
+bot.action("prev_translation_ayah", async (ctx) => {
+  try {
+    const userData = getUserData(ctx.from.id);
+    const prevAyah = Number(userData.text) - 1;
+
+    if (prevAyah < 1) {
+      return ctx.answerCbQuery("❌ Это первый аят суры");
+    }
+
+    userData.text = prevAyah;
+    await showTranslation(ctx, userData.track, prevAyah, false);
+
+    analytics.trackEvent(ctx.from.id, "prev_ayah_from_translation", {
+      surah: userData.track,
+      ayah: prevAyah,
+    });
+  } catch (error) {
+    logger.error("Error in prev_translation_ayah action:", error);
+    ctx.answerCbQuery("❌ Ошибка перехода к предыдущему аяту.");
   }
 });
 
