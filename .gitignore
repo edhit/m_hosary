@@ -131,3 +131,7 @@ temp
 .pnp.*
 
 audio_data.json
+
+*.db
+*.db-shm
+*.db-wal
