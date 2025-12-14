@@ -125,4 +125,4 @@ async function mp3create(settings) {
   return config
 }
 
-module.exports = { mp3create }
+module.exports = { mp3create, toGlobalAyah };

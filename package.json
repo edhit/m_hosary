@@ -7,10 +7,31 @@
     "node-cron": "^4.2.1",
     "node-fetch": "^2.7.0",
     "node-id3": "^0.2.6",
+    "sqlite3": "^5.1.7",
     "telegraf": "^4.16.3",
     "winston": "^3.17.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+
+    "dbTranslations": "node database/dbTranslations.js",
+    "dbKeys": "node database/dbKeys.js",
+    "dbTafsir": "node database/dbTafsir.js",
+    "dbAyahPhotos": "node database/dbAyahPhotos.js",
+
+    "db:all-parallel": "npm run dbTranslations & npm run dbKeys & npm run dbTafsir & npm run dbAyahPhotos",
+    "db:all-debug": "npm run dbTranslations --silent && echo '✓ Translations done' && npm run dbKeys --silent && echo '✓ Keys done' && npm run dbTafsir --silent && echo '✓ Tafsir done' && npm run dbAyahPhotos --silent && echo '✓ Ayah photos done' && echo '✅ All databases initialized!'",
+
+    "test-ta": "node tests/test-tafsir.js",
+    "test-ke": "node tests/test-keys.js",
+    "test-tr": "node tests/test-translations.js",
+    "test-us": "node tests/test-users.js",
+    "test-im": "node tests/test-ayahPhotos.js",
+
+    "setup": "node scripts/setup-all.js"
   }
 }
