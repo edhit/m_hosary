@@ -1,0 +1,21 @@
+{
+    "recommendations": [
+      // Основные расширения
+      "dbaeumer.vscode-eslint",
+      "esbenp.prettier-vscode",
+      "streetsidesoftware.code-spell-checker",
+  
+      // Автосохранение и форматирование
+      "Gruntfuggly.auto-snippet",
+      "mrmlnc.vscode-autoprefixer",
+  
+      // Улучшения редактора
+      "editorconfig.editorconfig",
+      "visualstudioexptteam.vscodeintellicode",
+      "usernamehw.errorlens",
+      
+      // JavaScript/TypeScript
+      "christian-kohler.npm-intellisense",
+      "eamodio.gitlens"
+    ]
+  }
