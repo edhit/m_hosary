@@ -2217,8 +2217,6 @@ bot.action(/^color_([🟢🔵🟡🔴🟣🟠🟥🔈]+)(?::(\d+):(\d+))?$/, asy
     // Получаем или создаем userData
     const userData = getUserData(ctx.from.id);
     userData.color = colorEmoji;
-    userData.track = surah;
-    userData.text = ayah.toString();
 
     let audioFileId;
     if (userData.audioPath !== "temp/result.mp3") {
@@ -2229,11 +2227,11 @@ bot.action(/^color_([🟢🔵🟡🔴🟣🟠🟥🔈]+)(?::(\d+):(\d+))?$/, asy
     }
 
     const surahInfo = surahs[surah - 1] || {};
-    userData.message = `${colorEmoji} Сура ${surah} «${surahInfo.name_en} (${
-      surahInfo.name_ru
-    }), аят ${ayah}» - Махмуд Аль-Хусари\n\n#коран ${toHashtag(
+    userData.message = `${colorEmoji} Сура ${userData.track} «${
       surahInfo.name_en
-    )}`;
+    } (${surahInfo.name_ru}), аят ${
+      userData.text
+    }» - Махмуд Аль-Хусари\n\n#коран ${toHashtag(surahInfo.name_en)}`;
 
     const isOneAyah = true; // Для одиночного аята всегда true в этом контексте
 
