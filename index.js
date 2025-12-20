@@ -738,34 +738,36 @@ const audioQuality = {
 async function finalizeAudio(ctx, userData) {
   try {
     const isOneAyah = userData.text && /^\d+$/.test(userData.text.trim());
+    const surah = parseInt(userData.track);
+    const ayah = parseInt(userData.text);
 
     if (isAdmin(ctx.from.id)) {
       await ctx.reply(
         "Выберите цвет перед подтверждением:",
         Markup.inlineKeyboard([
           [
-            Markup.button.callback("🔵", "color_🔵"),
-            Markup.button.callback("🟢", "color_🟢"),
-            Markup.button.callback("🔴", "color_🔴"),
-            Markup.button.callback("🟡", "color_🟡"),
+            Markup.button.callback("🔵", `color_🔵:${surah}:${ayah}`),
+            Markup.button.callback("🟢", `color_🟢:${surah}:${ayah}`),
+            Markup.button.callback("🔴", `color_🔴:${surah}:${ayah}`),
+            Markup.button.callback("🟡", `color_🟡:${surah}:${ayah}`),
           ],
           [
-            Markup.button.callback("🟣", "color_🟣"),
-            Markup.button.callback("🟠", "color_🟠"),
-            Markup.button.callback("🟥", "color_🟥"),
+            Markup.button.callback("🟣", `color_🟣:${surah}:${ayah}`),
+            Markup.button.callback("🟠", `color_🟠:${surah}:${ayah}`),
+            Markup.button.callback("🟥", `color_🟥:${surah}:${ayah}`),
           ],
           ...(isOneAyah
             ? [
                 [
                   Markup.button.callback(
                     "📕 Показать перевод",
-                    "show_translate:false"
+                    `show_translate:false:${surah}:${ayah}`
                   ),
                 ],
                 [
                   Markup.button.callback(
                     "📘 Показать тафсир",
-                    "show_tafsir:false"
+                    `show_tafsir:false:${surah}:${ayah}`
                   ),
                 ],
               ]
@@ -776,19 +778,24 @@ async function finalizeAudio(ctx, userData) {
       await ctx.reply(
         "Аудио готово!",
         Markup.inlineKeyboard([
-          [Markup.button.callback("🔈 Прослушать аят", "color_🔈")],
+          [
+            Markup.button.callback(
+              "🔈 Прослушать аят",
+              `color_🔈:${surah}:${ayah}`
+            ),
+          ],
           ...(isOneAyah
             ? [
                 [
                   Markup.button.callback(
                     "📕 Показать перевод",
-                    "show_translate:false"
+                    `show_translate:false:${surah}:${ayah}`
                   ),
                 ],
                 [
                   Markup.button.callback(
                     "📘 Показать тафсир",
-                    "show_tafsir:false"
+                    `show_tafsir:false:${surah}:${ayah}`
                   ),
                 ],
               ]
@@ -801,6 +808,7 @@ async function finalizeAudio(ctx, userData) {
     return true;
   } catch (error) {
     logger.error("finalizeAudio error:", error);
+    return false;
   }
 }
 
@@ -837,14 +845,18 @@ function getNavigationKeyboard(surah, ayah, tafsir = true) {
     if (ayah > 1) {
       buttons.push({
         text: "⬅️ Пред.аят",
-        callback_data: tafsir ? `prev_ayah:false` : `prev_ayah:true`,
+        callback_data: tafsir
+          ? `prev_ayah:${surah}:${ayah - 1}:false`
+          : `prev_ayah:${surah}:${ayah - 1}:true`,
       });
     }
 
     if (surahInfo && ayah < surahInfo.ayahs) {
       buttons.push({
         text: "След.аят ➡️",
-        callback_data: tafsir ? `next_ayah:false` : `next_ayah:true`,
+        callback_data: tafsir
+          ? `next_ayah:${surah}:${ayah + 1}:false`
+          : `next_ayah:${surah}:${ayah + 1}:true`,
       });
     }
 
@@ -853,11 +865,20 @@ function getNavigationKeyboard(surah, ayah, tafsir = true) {
       keyboard.push(buttons);
     }
 
-    keyboard.push([{ text: "🔈 Прослушать аят", callback_data: `color_🔈` }]);
+    // Используем новый формат: только эмодзи кружка + сура и аят
+    keyboard.push([
+      {
+        text: "🔈 Прослушать аят",
+        callback_data: `color_🔈:${surah}:${ayah}`,
+      },
+    ]);
 
     if (tafsir) {
       keyboard.push([
-        { text: "📘 Перейти к тафсиру", callback_data: `show_tafsir_reply` },
+        {
+          text: "📘 Перейти к тафсиру",
+          callback_data: `show_tafsir_reply:${surah}:${ayah}`,
+        },
       ]);
     }
 
@@ -955,14 +976,14 @@ _${firstPart}_
     if (ayah > 1) {
       ayahNavigation.push({
         text: "⬅️ Пред.аят",
-        callback_data: `prev_translation_ayah`,
+        callback_data: `prev_translation_ayah:${surah}:${ayah - 1}`,
       });
     }
 
     if (surahInfo && ayah < surahInfo.ayahs) {
       ayahNavigation.push({
         text: "След.аят ➡️",
-        callback_data: `next_translation_ayah`,
+        callback_data: `next_translation_ayah:${surah}:${ayah + 1}`,
       });
     }
 
@@ -970,13 +991,19 @@ _${firstPart}_
       keyboard.inline_keyboard.push(ayahNavigation);
     }
 
-    // Кнопка прослушивания и перехода к тафсиру
+    // Кнопка прослушивания - только эмодзи кружка + сура и аят
     keyboard.inline_keyboard.push([
-      { text: "🔈 Прослушать аят", callback_data: `color_🔈` },
+      {
+        text: "🔈 Прослушать аят",
+        callback_data: `color_🔈:${surah}:${ayah}`,
+      },
     ]);
 
     keyboard.inline_keyboard.push([
-      { text: "📘 Перейти к тафсиру", callback_data: `show_tafsir_reply` },
+      {
+        text: "📘 Перейти к тафсиру",
+        callback_data: `show_tafsir_reply:${surah}:${ayah}`,
+      },
     ]);
 
     // Если есть фото, отправляем его
@@ -1079,19 +1106,78 @@ async function showTafsir(ctx, reply = false) {
       tafsir = "⚠️ Для этого аята тафсира нет.";
     }
 
-    const words = tafsir.split(" ");
-    const maxLength = 512;
-    let current = "";
+    // Разбиваем тафсир на части для комфортного чтения
+    // 3500 символов ~ 500-600 слов - оптимально для одного сообщения
+    const MAX_CHARS_PER_PART = 1700;
+    const SENTENCE_ENDINGS = [".", "!", "?", ";", ":", "»", "..."];
 
-    for (const word of words) {
-      if ((current + " " + word).length > maxLength) {
-        userData.tafsirParts.push(current.trim() + "...");
-        current = word;
-      } else {
-        current += " " + word;
+    let parts = [];
+    let remainingText = tafsir;
+
+    while (remainingText.length > 0) {
+      // Если оставшийся текст меньше максимальной длины, добавляем его целиком
+      if (remainingText.length <= MAX_CHARS_PER_PART) {
+        parts.push(remainingText.trim());
+        break;
       }
+
+      // Ищем хорошее место для разрыва в пределах MAX_CHARS_PER_PART
+      let cutIndex = MAX_CHARS_PER_PART;
+      let foundBreak = false;
+
+      // Пытаемся найти конец предложения
+      for (let i = MAX_CHARS_PER_PART; i > MAX_CHARS_PER_PART - 500; i--) {
+        if (i >= remainingText.length) continue;
+
+        // Проверяем конец предложения
+        if (SENTENCE_ENDINGS.includes(remainingText[i])) {
+          // Проверяем, что после знака препинания идет пробел или конец строки
+          if (
+            i + 1 >= remainingText.length ||
+            /\s/.test(remainingText[i + 1])
+          ) {
+            cutIndex = i + 1;
+            foundBreak = true;
+            break;
+          }
+        }
+
+        // Проверяем конец абзаца
+        if (remainingText[i] === "\n" && i > MAX_CHARS_PER_PART - 100) {
+          cutIndex = i + 1;
+          foundBreak = true;
+          break;
+        }
+      }
+
+      // Если не нашли хороший разрыв по знакам препинания, ищем по пробелу
+      if (!foundBreak) {
+        for (let i = MAX_CHARS_PER_PART; i > MAX_CHARS_PER_PART - 100; i--) {
+          if (i >= remainingText.length) continue;
+          if (remainingText[i] === " ") {
+            cutIndex = i + 1;
+            foundBreak = true;
+            break;
+          }
+        }
+      }
+
+      // Если всё еще не нашли, делаем разрыв по максимальной длине
+      if (!foundBreak) {
+        cutIndex = MAX_CHARS_PER_PART;
+      }
+
+      // Добавляем часть
+      const part = remainingText.substring(0, cutIndex).trim();
+      if (part.length > 0) {
+        parts.push(part);
+      }
+
+      // Обрезаем обработанную часть
+      remainingText = remainingText.substring(cutIndex).trim();
     }
-    if (current.trim()) userData.tafsirParts.push(current.trim());
+
+    userData.tafsirParts = parts;
 
     if (!userData.tafsirParts || userData.tafsirParts.length === 0) {
       await ctx.answerCbQuery("❌ Ошибка при обработке тафсира.");
@@ -1105,10 +1191,19 @@ async function showTafsir(ctx, reply = false) {
       userData.tafsirParts.length > 1
         ? {
             inline_keyboard: [
-              [{ text: "Показать ещё", callback_data: "tafsir_next" }],
+              [
+                {
+                  text: "📖 Продолжение тафсира",
+                  callback_data: "tafsir_next",
+                },
+              ],
             ],
           }
         : getNavigationKeyboard(surah, ayah, false);
+
+    // Формируем первое сообщение
+    const firstPartText = userData.tafsirParts[0];
+    const hasMore = userData.tafsirParts.length > 1;
 
     const message = `
 📘 *Тафсир ас-Са'ди*
@@ -1117,7 +1212,9 @@ async function showTafsir(ctx, reply = false) {
 🔹 *Аят:* ${ayah}
 
 💬 *Толкование:*
-_${userData.tafsirParts[0]}_
+${firstPartText}${hasMore ? "..." : ""}
+
+${hasMore ? `📄 _Часть 1 из ${userData.tafsirParts.length}_` : ""}
 `;
 
     if (reply) {
@@ -1131,8 +1228,18 @@ _${userData.tafsirParts[0]}_
         reply_markup: keyboard,
       });
     }
+
+    // Логируем статистику по тафсиру
+    if (userData.tafsirParts.length > 1) {
+      logger.info(`Tafsir split into ${userData.tafsirParts.length} parts`, {
+        surah,
+        ayah,
+        parts: userData.tafsirParts.length,
+        avgLength: Math.round(tafsir.length / userData.tafsirParts.length),
+      });
+    }
   } catch (err) {
-    logger.error(err);
+    logger.error("Error in showTafsir:", err);
     await ctx.answerCbQuery("❌ Ошибка при загрузке.");
     await ctx.reply("Ошибка при загрузке тафсира. Попробуйте позже.");
   }
@@ -1374,6 +1481,7 @@ async function createAudioWithLimits(ctx, userData, ayahs) {
       await finalizeAudio(ctx, userData);
       success = true;
     }
+
     return {
       success,
       error: success ? null : MESSAGE_TEMPLATES.error("processing"),
@@ -2080,54 +2188,82 @@ bot.on("text", async (ctx) => {
 
 // ================ ОБРАБОТЧИКИ КОЛБЭКОВ ================
 
-// Обработка выбора цвета
-bot.action(/color_(.+)/, async (ctx) => {
+// ================ УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ЦВЕТА ================
+bot.action(/^color_([🟢🔵🟡🔴🟣🟠🟥🔈]+)(?::(\d+):(\d+))?$/, async (ctx) => {
   try {
-    await ctx.deleteMessage();
-    const userData = getUserData(ctx.from.id);
-    const colorAction = ctx.match[1];
-    userData.color = colorAction;
+    await ctx.answerCbQuery("Загружаю аят...");
+    await ctx.editMessageReplyMarkup();
+    const colorEmoji = ctx.match[1]; // Только эмодзи кружка
 
-    if (
-      !userData.audioPath ||
-      !userData.track ||
-      !userData.text ||
-      !userData.artist
-    ) {
-      return ctx.reply(
-        "Недостаточно данных для отправки аудио. Начните заново."
-      );
+    // Определяем режим: с сурой/аятом или без
+    const hasAyahInfo = ctx.match[2] && ctx.match[3];
+    let surah, ayah;
+
+    if (hasAyahInfo) {
+      // Режим с сурой и аятом в callback_data
+      surah = parseInt(ctx.match[2]);
+      ayah = parseInt(ctx.match[3]);
+    } else {
+      // Режим с данными из сессии
+      const userData = getUserData(ctx.from.id);
+      surah = parseInt(userData.track);
+      ayah = parseInt(userData.text);
     }
 
-    userData.audioPath = await getValue(
-      toGlobalAyah(userData.track, parseInt(userData.text))
-    );
-    userData.text = userData.text.toString();
+    if (!surah || !ayah || isNaN(surah) || isNaN(ayah)) {
+      return ctx.reply("Не удалось определить суру и аят. Начните заново.");
+    }
 
-    const surahInfo = surahs[Number(userData.track) - 1] || {};
-    userData.message = `${colorAction} Сура ${userData.track} «${
+    // Получаем или создаем userData
+    const userData = getUserData(ctx.from.id);
+    userData.color = colorEmoji;
+    userData.track = surah;
+    userData.text = ayah.toString();
+
+    let audioFileId;
+    if (userData.audioPath !== "temp/result.mp3") {
+      audioFileId = await getValue(toGlobalAyah(surah, ayah));
+      userData.audioPath = audioFileId;
+    } else {
+      audioFileId = userData.audioPath;
+    }
+
+    const surahInfo = surahs[surah - 1] || {};
+    userData.message = `${colorEmoji} Сура ${surah} «${surahInfo.name_en} (${
+      surahInfo.name_ru
+    }), аят ${ayah}» - Махмуд Аль-Хусари\n\n#коран ${toHashtag(
       surahInfo.name_en
-    } (${surahInfo.name_ru}), ${userData.text.includes("-") ? "аяты" : "аят"} ${
-      userData.text
-    }» - Махмуд Аль-Хусари\n\n#коран ${toHashtag(surahInfo.name_en)}`;
+    )}`;
 
-    const isOneAyah = userData.text && /^\d+$/.test(userData.text.trim());
+    const isOneAyah = true; // Для одиночного аята всегда true в этом контексте
 
     // Кнопки для админа
     const adminKeyboard = [
-      [
-        Markup.button.callback("✅ Отправить", "send_audio"),
-        Markup.button.callback("❌ Отмена", "cancel_audio"),
-      ],
+      // Кнопки для аудио (появляются только когда colorEmoji === '🔈')
+      ...(colorEmoji !== "🔈"
+        ? [
+            [
+              Markup.button.callback("✅ Отправить", "send_audio"),
+              Markup.button.callback("❌ Отмена", "cancel_audio"),
+            ],
+          ]
+        : []),
+
+      // Кнопки для одного аята (появляются только когда isOneAyah === true)
       ...(isOneAyah
         ? [
             [
               Markup.button.callback(
                 "📕 Показать перевод",
-                "show_translate:true"
+                `show_translate:true:${surah}:${ayah}`
               ),
             ],
-            [Markup.button.callback("📘 Показать тафсир", "show_tafsir:true")],
+            [
+              Markup.button.callback(
+                "📘 Показать тафсир",
+                `show_tafsir:true:${surah}:${ayah}`
+              ),
+            ],
           ]
         : []),
     ];
@@ -2139,30 +2275,49 @@ bot.action(/color_(.+)/, async (ctx) => {
             [
               Markup.button.callback(
                 "📕 Показать перевод",
-                "show_translate:true"
+                `show_translate:true:${surah}:${ayah}`
               ),
             ],
-            [Markup.button.callback("📘 Показать тафсир", "show_tafsir:true")],
+            [
+              Markup.button.callback(
+                "📘 Показать тафсир",
+                `show_tafsir:true:${surah}:${ayah}`
+              ),
+            ],
           ]
         : []),
     ];
 
-    let audioFileId = await ctx.replyWithAudio(
-      getAudioInput(userData.audioPath),
-      {
-        filename: `${userData.artist} - ${surahInfo.name_en} - ${userData.text}.mp3`,
-        caption: userData.message,
-        reply_markup: isAdmin(ctx.from.id)
-          ? Markup.inlineKeyboard(adminKeyboard).reply_markup
-          : Markup.inlineKeyboard(userKeyboard).reply_markup,
-      }
-    );
+    let audioMessage;
+    try {
+      audioMessage = await ctx.replyWithAudio(
+        getAudioInput(userData.audioPath),
+        {
+          filename: `M. Al-Hosary - ${surahInfo.name_en} - ${ayah}.mp3`,
+          caption: userData.message,
+          reply_markup: isAdmin(ctx.from.id)
+            ? Markup.inlineKeyboard(adminKeyboard).reply_markup
+            : Markup.inlineKeyboard(userKeyboard).reply_markup,
+        }
+      );
+    } catch (audioError) {
+      logger.error("Error sending audio:", audioError);
+      return ctx.reply("Ошибка при отправке аудио. Попробуйте еще раз.");
+    }
 
-    userData.audioPath = audioFileId.audio.file_id;
+    userData.audioPath = audioMessage.audio.file_id;
 
-    analytics.trackEvent(ctx.from.id, "color_selected", { color: colorAction });
+    analytics.trackEvent(ctx.from.id, "color_selected", {
+      color: colorEmoji,
+      mode: hasAyahInfo ? "callback_data" : "session",
+      surah,
+      ayah,
+    });
   } catch (err) {
-    logger.error(`Color action error: ${err.message}`);
+    logger.error(`Color action error: ${err.message}`, {
+      match: ctx.match,
+      userId: ctx.from.id,
+    });
     ctx.reply("Ошибка при выборе цвета.");
   }
 });
@@ -2170,7 +2325,7 @@ bot.action(/color_(.+)/, async (ctx) => {
 // Отправка аудио в канал
 bot.action("send_audio", async (ctx) => {
   try {
-    await ctx.deleteMessage();
+    await ctx.editMessageReplyMarkup();
     const userData = getUserData(ctx.from.id);
 
     if (!userData.audioPath) return ctx.reply("Аудиофайл не найден.");
@@ -2227,8 +2382,9 @@ bot.action("send_audio", async (ctx) => {
 // Отмена отправки
 bot.action("cancel_audio", async (ctx) => {
   try {
+    await ctx.editMessageReplyMarkup();
+
     const userData = getUserData(ctx.from.id);
-    await ctx.deleteMessage();
     ctx.reply("Отправка отменена.");
     clearTempFolder();
     Object.assign(userData, {
@@ -2244,13 +2400,16 @@ bot.action("cancel_audio", async (ctx) => {
 });
 
 // Показать перевод
-bot.action(/show_translate:(true|false)/, async (ctx) => {
+bot.action(/show_translate:(true|false):(\d+):(\d+)/, async (ctx) => {
   try {
     const flag = ctx.match[1] === "true";
-    const userData = getUserData(ctx.from.id);
+    const surah = parseInt(ctx.match[2]);
+    const ayah = parseInt(ctx.match[3]);
 
-    const surah = Number(userData.track);
-    const ayah = Number(userData.text);
+    // Обновляем сессию для консистентности
+    const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = ayah.toString();
 
     await showTranslation(ctx, surah, ayah, flag);
 
@@ -2295,14 +2454,20 @@ _${translationResult}_
       reply_markup: {
         inline_keyboard: [
           [
-            { text: "⬅️ Пред.аят", callback_data: `prev_translation_ayah` },
-            { text: "След.аят ➡️", callback_data: `next_translation_ayah` },
+            {
+              text: "⬅️ Пред.аят",
+              callback_data: `prev_translation_ayah:${surah}:${ayah - 1}`,
+            },
+            {
+              text: "След.аят ➡️",
+              callback_data: `next_translation_ayah:${surah}:${ayah + 1}`,
+            },
           ],
           [{ text: "🔈 Прослушать аят", callback_data: `color_🔈` }],
           [
             {
               text: "📘 Перейти к тафсиру",
-              callback_data: `show_tafsir_reply`,
+              callback_data: `show_tafsir_reply:${surah}:${ayah}`,
             },
           ],
         ],
@@ -2319,66 +2484,22 @@ _${translationResult}_
   }
 });
 
-// Обработчик перехода к следующему аяту из перевода
-bot.action("next_translation_ayah", async (ctx) => {
+bot.action(/next_ayah:(\d+):(\d+):(true|false)/, async (ctx) => {
   try {
+    const surah = parseInt(ctx.match[1]);
+    const nextAyah = parseInt(ctx.match[2]);
+    const flag = ctx.match[3] === "true";
+
+    // Обновляем сессию
     const userData = getUserData(ctx.from.id);
-    const nextAyah = Number(userData.text) + 1;
-    const surahInfo = surahs[userData.track - 1];
+    userData.track = surah;
+    userData.text = nextAyah.toString();
 
-    if (!surahInfo || nextAyah > surahInfo.ayahs) {
-      return ctx.answerCbQuery("❌ Это последний аят суры");
-    }
-
-    userData.text = nextAyah;
-    await showTranslation(ctx, userData.track, nextAyah, false);
-
-    analytics.trackEvent(ctx.from.id, "next_ayah_from_translation", {
-      surah: userData.track,
-      ayah: nextAyah,
-    });
-  } catch (error) {
-    logger.error("Error in next_translation_ayah action:", error);
-    ctx.answerCbQuery("❌ Ошибка перехода к следующему аяту.");
-  }
-});
-
-// Обработчик перехода к предыдущему аяту из перевода
-bot.action("prev_translation_ayah", async (ctx) => {
-  try {
-    const userData = getUserData(ctx.from.id);
-    const prevAyah = Number(userData.text) - 1;
-
-    if (prevAyah < 1) {
-      return ctx.answerCbQuery("❌ Это первый аят суры");
-    }
-
-    userData.text = prevAyah;
-    await showTranslation(ctx, userData.track, prevAyah, false);
-
-    analytics.trackEvent(ctx.from.id, "prev_ayah_from_translation", {
-      surah: userData.track,
-      ayah: prevAyah,
-    });
-  } catch (error) {
-    logger.error("Error in prev_translation_ayah action:", error);
-    ctx.answerCbQuery("❌ Ошибка перехода к предыдущему аяту.");
-  }
-});
-
-// Следующий аят
-bot.action(/next_ayah:(true|false)/, async (ctx) => {
-  try {
-    const flag = ctx.match[1] === "true"; // превращаем строку в boolean
-    const userData = getUserData(ctx.from.id);
-    userData.text = Number(userData.text) + 1;
-
-    if (userData.text >= 1) {
-      await showTranslation(ctx, userData.track, userData.text, flag);
+    if (nextAyah >= 1) {
+      await showTranslation(ctx, surah, nextAyah, flag);
       analytics.trackEvent(ctx.from.id, "next_ayah_navigation", {
-        surah: userData.track,
-        ayah: userData.text,
-        // showTranslation: flag
+        surah,
+        ayah: nextAyah,
       });
     } else {
       await ctx.answerCbQuery("❌ Это первый аят суры");
@@ -2389,19 +2510,22 @@ bot.action(/next_ayah:(true|false)/, async (ctx) => {
   }
 });
 
-// Предыдущий аят
-bot.action(/prev_ayah:(true|false)/, async (ctx) => {
+bot.action(/prev_ayah:(\d+):(\d+):(true|false)/, async (ctx) => {
   try {
-    const flag = ctx.match[1] === "true"; // превращаем строку в boolean
-    const userData = getUserData(ctx.from.id);
-    userData.text = Number(userData.text) - 1;
+    const surah = parseInt(ctx.match[1]);
+    const prevAyah = parseInt(ctx.match[2]);
+    const flag = ctx.match[3] === "true";
 
-    if (userData.text >= 1) {
-      await showTranslation(ctx, userData.track, userData.text, flag);
+    // Обновляем сессию
+    const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = prevAyah.toString();
+
+    if (prevAyah >= 1) {
+      await showTranslation(ctx, surah, prevAyah, flag);
       analytics.trackEvent(ctx.from.id, "prev_ayah_navigation", {
-        surah: userData.track,
-        ayah: userData.text,
-        // showTranslation: flag
+        surah,
+        ayah: prevAyah,
       });
     } else {
       await ctx.answerCbQuery("❌ Это первый аят суры");
@@ -2412,21 +2536,75 @@ bot.action(/prev_ayah:(true|false)/, async (ctx) => {
   }
 });
 
-// Показать тафсир
-bot.action(/show_tafsir:(true|false)/, async (ctx) => {
+bot.action(/next_translation_ayah:(\d+):(\d+)/, async (ctx) => {
   try {
-    const flag = ctx.match[1] === "true"; // превращаем строку в boolean
-    const userData = getUserData(ctx.from.id);
+    const surah = parseInt(ctx.match[1]);
+    const nextAyah = parseInt(ctx.match[2]);
+    const surahInfo = surahs[surah - 1];
 
-    const surah = Number(userData.track);
-    const ayah = Number(userData.text);
+    if (!surahInfo || nextAyah > surahInfo.ayahs) {
+      return ctx.answerCbQuery("❌ Это последний аят суры");
+    }
+
+    // Обновляем сессию
+    const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = nextAyah.toString();
+
+    await showTranslation(ctx, surah, nextAyah, false);
+
+    analytics.trackEvent(ctx.from.id, "next_ayah_from_translation", {
+      surah,
+      ayah: nextAyah,
+    });
+  } catch (error) {
+    logger.error("Error in next_translation_ayah action:", error);
+    ctx.answerCbQuery("❌ Ошибка перехода к следующему аяту.");
+  }
+});
+
+bot.action(/prev_translation_ayah:(\d+):(\d+)/, async (ctx) => {
+  try {
+    const surah = parseInt(ctx.match[1]);
+    const prevAyah = parseInt(ctx.match[2]);
+
+    if (prevAyah < 1) {
+      return ctx.answerCbQuery("❌ Это первый аят суры");
+    }
+
+    // Обновляем сессию
+    const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = prevAyah.toString();
+
+    await showTranslation(ctx, surah, prevAyah, false);
+
+    analytics.trackEvent(ctx.from.id, "prev_ayah_from_translation", {
+      surah,
+      ayah: prevAyah,
+    });
+  } catch (error) {
+    logger.error("Error in prev_translation_ayah action:", error);
+    ctx.answerCbQuery("❌ Ошибка перехода к предыдущему аяту.");
+  }
+});
+
+bot.action(/show_tafsir:(true|false):(\d+):(\d+)/, async (ctx) => {
+  try {
+    const flag = ctx.match[1] === "true";
+    const surah = parseInt(ctx.match[2]);
+    const ayah = parseInt(ctx.match[3]);
+
+    // Обновляем сессию
+    const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = ayah.toString();
 
     await showTafsir(ctx, flag);
 
     analytics.trackEvent(ctx.from.id, "tafsir_viewed", {
       surah,
       ayah,
-      // flag,
     });
   } catch (error) {
     logger.error("Error in show_tafsir action:", error);
@@ -2434,14 +2612,21 @@ bot.action(/show_tafsir:(true|false)/, async (ctx) => {
   }
 });
 
-// Показать тафсир (из перевода)
-bot.action("show_tafsir_reply", async (ctx) => {
+bot.action(/show_tafsir_reply:(\d+):(\d+)/, async (ctx) => {
   try {
-    await showTafsir(ctx, true);
+    const surah = parseInt(ctx.match[1]);
+    const ayah = parseInt(ctx.match[2]);
+
+    // Обновляем сессию
     const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = ayah.toString();
+
+    await showTafsir(ctx, true);
+
     analytics.trackEvent(ctx.from.id, "tafsir_viewed_from_translation", {
-      surah: userData.track,
-      ayah: userData.text,
+      surah,
+      ayah,
     });
   } catch (error) {
     logger.error("Error in show_tafsir_reply action:", error);
@@ -2452,7 +2637,6 @@ bot.action("show_tafsir_reply", async (ctx) => {
 // Следующая часть тафсира
 bot.action("tafsir_next", async (ctx) => {
   try {
-    await ctx.answerCbQuery();
     const userData = getUserData(ctx.from.id);
 
     if (!userData.tafsirParts || userData.tafsirParts.length === 0) {
@@ -2461,7 +2645,7 @@ bot.action("tafsir_next", async (ctx) => {
     }
 
     if (userData.currentTafsirPage >= userData.tafsirParts.length - 1) {
-      await ctx.answerCbQuery("❌ Это последняя страница тафсира.");
+      await ctx.answerCbQuery("✅ Вы прочитали весь тафсир!");
       return;
     }
 
@@ -2470,23 +2654,30 @@ bot.action("tafsir_next", async (ctx) => {
 
     const hasMore =
       userData.currentTafsirPage < userData.tafsirParts.length - 1;
+    const surahInfo = surahs[userData.track - 1] || {};
+
+    // Формируем текст текущей части
+    const currentPartText = userData.tafsirParts[userData.currentTafsirPage];
+
     const keyboard = hasMore
       ? {
           inline_keyboard: [
-            [{ text: "Показать ещё", callback_data: "tafsir_next" }],
+            [{ text: "📖 Продолжение тафсира", callback_data: "tafsir_next" }],
           ],
         }
       : getNavigationKeyboard(userData.track, userData.text, false);
 
-    const currentTafsirText = userData.tafsirParts[userData.currentTafsirPage];
-    if (!currentTafsirText) {
-      await ctx.answerCbQuery("❌ Ошибка: текст тафсира не найден.");
-      return;
-    }
+    const message = `
+📘 *Тафсир ас-Са'ди* (продолжение)
+━━━━━━━━━━━━━━━
+🕋 *Сура:* ${userData.track} ${surahInfo.name_ru || ""}
+🔹 *Аят:* ${userData.text}
 
-    const message = `..._${currentTafsirText}_\n\nСтраница: *${
-      userData.currentTafsirPage + 1
-    }/${userData.tafsirParts.length}*`;
+💬 *Толкование:*
+${currentPartText}${hasMore ? "..." : ""}
+
+📄 _Часть ${userData.currentTafsirPage + 1} из ${userData.tafsirParts.length}_
+`;
 
     await ctx.reply(message, {
       parse_mode: "Markdown",
@@ -2496,9 +2687,10 @@ bot.action("tafsir_next", async (ctx) => {
     analytics.trackEvent(ctx.from.id, "tafsir_pagination", {
       page: userData.currentTafsirPage + 1,
       total: userData.tafsirParts.length,
+      chars: currentPartText.length,
     });
   } catch (err) {
-    logger.error(err);
+    logger.error("Error in tafsir_next action:", err);
     await ctx.answerCbQuery("❌ Ошибка при загрузке тафсира.");
   }
 });
