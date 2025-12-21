@@ -1338,14 +1338,19 @@ bot.use(async (ctx, next) => {
     const username = ctx.from?.username || "без username";
     const firstName = ctx.from?.first_name || "без имени";
 
+    // Проверяем, есть ли сообщение или callback
+    if (!ctx.message && !ctx.callbackQuery) {
+      return await next();
+    }
+
     // Пропускаем лимиты для администраторов
     if (isAdmin(userId)) {
       botStats.totalRequests++;
       if (userId) botStats.users.add(userId);
 
       logger.info(
-        `Пользователь ${userId} (@${username}, ${firstName}) вызвал команду: ${
-          ctx.message?.text || "callback"
+        `Пользователь ${userId} (@${username}, ${firstName}) вызвал: ${
+          ctx.message?.text || ctx.callbackQuery?.data || "callback"
         }`
       );
 
@@ -1353,7 +1358,7 @@ bot.use(async (ctx, next) => {
 
       if (userId) {
         analytics.trackEvent(userId, "request_completed", {
-          command: ctx.message?.text,
+          command: ctx.message?.text || ctx.callbackQuery?.data,
           chatType: ctx.chat?.type,
         });
       }
@@ -1363,6 +1368,7 @@ bot.use(async (ctx, next) => {
     // Проверяем лимиты через Redis
     if (FEATURE_FLAGS.redisLimits) {
       const limitCheck = await redisLimiter.checkAndIncrement(userId);
+      console.log(limitCheck);
 
       if (!limitCheck.allowed) {
         logger.warn(
@@ -1372,17 +1378,33 @@ bot.use(async (ctx, next) => {
             reason: limitCheck.reason,
             username,
             firstName,
+            timestamp: new Date().toISOString(),
           }
         );
 
         analytics.trackEvent(userId, "rate_limit_exceeded", {
           reason: limitCheck.reason,
-          command: ctx.message?.text,
+          command: ctx.message?.text || ctx.callbackQuery?.data,
+          message: limitCheck.message,
         });
 
-        return ctx.reply(
-          limitCheck.message || MESSAGE_TEMPLATES.error("rateLimit")
-        );
+        // Для callback запросов отвечаем через answerCbQuery
+        if (ctx.callbackQuery) {
+          return ctx.answerCbQuery(
+            limitCheck.message || MESSAGE_TEMPLATES.error("rateLimit"),
+            { show_alert: true }
+          );
+        }
+
+        // Для текстовых сообщений отправляем reply
+        if (ctx.message) {
+          return ctx.reply(
+            limitCheck.message || MESSAGE_TEMPLATES.error("rateLimit"),
+            { parse_mode: "Markdown" }
+          );
+        }
+
+        return; // Прерываем обработку
       }
     }
 
@@ -1390,8 +1412,8 @@ bot.use(async (ctx, next) => {
     if (userId) botStats.users.add(userId);
 
     logger.info(
-      `Пользователь ${userId} (@${username}, ${firstName}) вызвал команду: ${
-        ctx.message?.text || "callback"
+      `Пользователь ${userId} (@${username}, ${firstName}) вызвал: ${
+        ctx.message?.text || ctx.callbackQuery?.data || "callback"
       }`
     );
 
@@ -1399,7 +1421,7 @@ bot.use(async (ctx, next) => {
 
     if (userId) {
       analytics.trackEvent(userId, "request_completed", {
-        command: ctx.message?.text,
+        command: ctx.message?.text || ctx.callbackQuery?.data,
         chatType: ctx.chat?.type,
       });
     }
@@ -2686,7 +2708,11 @@ bot.action("tafsir_next", async (ctx) => {
             [{ text: "📖 Продолжение тафсира", callback_data: "tafsir_next" }],
           ],
         }
-      : getNavigationKeyboard(userData.track, userData.text, false);
+      : getNavigationKeyboard(
+          parseInt(userData.track),
+          parseInt(userData.text),
+          false
+        );
 
     const message = `
 📘 *Тафсир ас-Са'ди* (продолжение)

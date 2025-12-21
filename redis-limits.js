@@ -75,6 +75,27 @@ class RedisLimiter {
   async checkAndIncrement(userId, type = "request") {
     await this.init();
 
+    function formatShortTime(ms) {
+      const seconds = Math.floor(ms / 1000);
+
+      if (seconds < 60) {
+        return `${seconds}с`;
+      }
+
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) {
+        return `${minutes}м`;
+      }
+
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) {
+        return `${hours}ч`;
+      }
+
+      const days = Math.floor(hours / 24);
+      return `${days}д`;
+    }
+
     const keys = this.getKeys(userId, type);
 
     try {
@@ -88,9 +109,9 @@ class RedisLimiter {
             reason: "banned",
             remaining: 0,
             reset: banData.expires,
-            message: `Вы заблокированы до ${new Date(
-              banData.expires
-            ).toLocaleTimeString("ru-RU")}. Причина: ${banData.reason}`,
+            message: `🚫 Повторите попытку через: ${formatShortTime(
+              banData.expires - Date.now()
+            )} | ${banData.reason}`,
           };
         } else {
           // Удаляем истекший бан
