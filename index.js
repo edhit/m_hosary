@@ -13,7 +13,7 @@ const Redis = require("ioredis");
 // Импорт данных и модулей
 const surahs = require("./quran.json");
 const { mp3create, toGlobalAyah } = require("./mp3create");
-const { getTafsir } = require("./db-tafsir");
+const { getTafsir, hasTafsir } = require("./db-tafsir");
 const { getAbuAdelTranslation } = require("./db-translations");
 const { getAyahPhoto } = require("./db-ayah-photos");
 const { getValue } = require("./db-keys");
@@ -741,6 +741,8 @@ async function finalizeAudio(ctx, userData) {
     const surah = parseInt(userData.track);
     const ayah = parseInt(userData.text);
 
+    const hasTafsirInfo = await hasTafsir(surah, ayah);
+
     if (isAdmin(ctx.from.id)) {
       await ctx.reply(
         "Выберите цвет перед подтверждением:",
@@ -764,12 +766,16 @@ async function finalizeAudio(ctx, userData) {
                     `show_translate:false:${surah}:${ayah}`
                   ),
                 ],
-                [
-                  Markup.button.callback(
-                    "📘 Показать тафсир",
-                    `show_tafsir:false:${surah}:${ayah}`
-                  ),
-                ],
+                ...(hasTafsirInfo
+                  ? [
+                      [
+                        Markup.button.callback(
+                          "📘 Показать тафсир",
+                          `show_tafsir:false:${surah}:${ayah}`
+                        ),
+                      ],
+                    ]
+                  : []),
               ]
             : []),
         ])
@@ -792,12 +798,16 @@ async function finalizeAudio(ctx, userData) {
                     `show_translate:false:${surah}:${ayah}`
                   ),
                 ],
-                [
-                  Markup.button.callback(
-                    "📘 Показать тафсир",
-                    `show_tafsir:false:${surah}:${ayah}`
-                  ),
-                ],
+                ...(hasTafsirInfo
+                  ? [
+                      [
+                        Markup.button.callback(
+                          "📘 Показать тафсир",
+                          `show_tafsir:false:${surah}:${ayah}`
+                        ),
+                      ],
+                    ]
+                  : []),
               ]
             : []),
         ])
@@ -991,6 +1001,8 @@ _${firstPart}_
       keyboard.inline_keyboard.push(ayahNavigation);
     }
 
+    const hasTafsirInfo = await hasTafsir(surah, ayah);
+
     // Кнопка прослушивания - только эмодзи кружка + сура и аят
     keyboard.inline_keyboard.push([
       {
@@ -999,12 +1011,13 @@ _${firstPart}_
       },
     ]);
 
-    keyboard.inline_keyboard.push([
-      {
-        text: "📘 Перейти к тафсиру",
-        callback_data: `show_tafsir_reply:${surah}:${ayah}`,
-      },
-    ]);
+    if (hasTafsirInfo)
+      keyboard.inline_keyboard.push([
+        {
+          text: "📘 Показать тафсир",
+          callback_data: `show_tafsir_reply:${surah}:${ayah}`,
+        },
+      ]);
 
     // Если есть фото, отправляем его
     if (photoFileId.status === "fulfilled" && photoFileId.value) {
@@ -1563,8 +1576,6 @@ ${
 <b>/colors</b> — Показать значение цветов.
 <b>/stats</b> — Статистика бота.
 <b>/popular</b> — Статистика популярных запросов.
-<b>/users_stats</b> — Статистика пользователей
-<b>/users_list</b> — Список пользователей
 <b>/limits</b> — Статистика лимитов пользователя
 <b>/reset_limits</b> — Сбросить лимиты пользователя
 <b>/unban</b> — Разблокировать пользователя
@@ -1578,6 +1589,8 @@ ${
 
 <b>Примечание:</b>
 Бот отправляет аят в исполнении Махмуда Аль-Хусари.
+
+<b>Ваш Telegram Id:</b> <code>${ctx.from.id}</code>
   `;
     ctx.reply(helpMsg, { parse_mode: "HTML" });
     analytics.trackEvent(ctx.from.id, "help_command");
@@ -2072,36 +2085,36 @@ bot.on("text", async (ctx) => {
           return ctx.reply("Введите номер суры (от 1 до 114)");
         }
 
-        if (newText === "📚 Начать заучивать") {
-          // правила заучивания
-          const rulesMsg = `
-<b>🤝 Ассаляму ‘алейкум!</b>
+        //         if (newText === "📚 Начать заучивать") {
+        //           // правила заучивания
+        //           const rulesMsg = `
+        // <b>🤝 Ассаляму ‘алейкум!</b>
 
-Мы рады приветствовать вас на пути заучивания Священного Корана — одному из величайших видов поклонения.
+        // Мы рады приветствовать вас на пути заучивания Священного Корана — одному из величайших видов поклонения.
 
-📖 Пророк ﷺ сказал:  
-<i>«Кто ступит на путь поиска знания, тому Аллах облегчает путь в Рай»</i>  
-<i>«Лучшие из вас — те, кто изучают Коран и обучают ему»</i>
+        // 📖 Пророк ﷺ сказал:
+        // <i>«Кто ступит на путь поиска знания, тому Аллах облегчает путь в Рай»</i>
+        // <i>«Лучшие из вас — те, кто изучают Коран и обучают ему»</i>
 
-Так как сегодня большинство людей пользуются мессенджерами, мы сделали процесс заучивания максимально простым и доступным.
+        // Так как сегодня большинство людей пользуются мессенджерами, мы сделали процесс заучивания максимально простым и доступным.
 
-✨ Совместно с <b>@lubi_quran</b> мы подготовили программу, основанную на принципе:  
-<b>— один аят → один шаг</b>
+        // ✨ Совместно с <b>@lubi_quran</b> мы подготовили программу, основанную на принципе:
+        // <b>— один аят → один шаг</b>
 
-<b>📘 В рамках программы:</b>
-• 🎧 вы слушаете чтение аята в исполнении шейха <b>Махмуда Халиля аль-Хусари</b>;  
-• 📕 читаете перевод для понимания смысла;  
-• 📘 изучаете краткий тафсир шейха <b>Ас-Са‘ди</b>;  
-• 🔁 после освоения аята переходите к следующему.
+        // <b>📘 В рамках программы:</b>
+        // • 🎧 вы слушаете чтение аята в исполнении шейха <b>Махмуда Халиля аль-Хусари</b>;
+        // • 📕 читаете перевод для понимания смысла;
+        // • 📘 изучаете краткий тафсир шейха <b>Ас-Са‘ди</b>;
+        // • 🔁 после освоения аята переходите к следующему.
 
-<b>📌 Правильное чтение — основа успешного заучивания.</b>  
-Поэтому рекомендуем пройти курс таджвида у <b>@lubi_quran</b>.
+        // <b>📌 Правильное чтение — основа успешного заучивания.</b>
+        // Поэтому рекомендуем пройти курс таджвида у <b>@lubi_quran</b>.
 
-<b>🤲 Пусть Аллах сделает ваше заучивание лёгким и благодатным и откроет вам понимание Его Книги.</b>
+        // <b>🤲 Пусть Аллах сделает ваше заучивание лёгким и благодатным и откроет вам понимание Его Книги.</b>
 
-          `;
-          return ctx.reply(rulesMsg, { parse_mode: "HTML" });
-        }
+        //           `;
+        //   return ctx.reply(rulesMsg, { parse_mode: "HTML" });
+        // }
 
         if (userData.button) {
           const surahNumber = parseInt(newText);
@@ -2235,6 +2248,8 @@ bot.action(/^color_([🟢🔵🟡🔴🟣🟠🟥🔈]+)(?::(\d+):(\d+))?$/, asy
 
     const isOneAyah = true; // Для одиночного аята всегда true в этом контексте
 
+    const hasTafsirInfo = await hasTafsir(surah, ayah);
+
     // Кнопки для админа
     const adminKeyboard = [
       // Кнопки для аудио (появляются только когда colorEmoji === '🔈')
@@ -2256,12 +2271,16 @@ bot.action(/^color_([🟢🔵🟡🔴🟣🟠🟥🔈]+)(?::(\d+):(\d+))?$/, asy
                 `show_translate:true:${surah}:${ayah}`
               ),
             ],
-            [
-              Markup.button.callback(
-                "📘 Показать тафсир",
-                `show_tafsir:true:${surah}:${ayah}`
-              ),
-            ],
+            ...(hasTafsirInfo
+              ? [
+                  [
+                    Markup.button.callback(
+                      "📘 Показать тафсир",
+                      `show_tafsir:true:${surah}:${ayah}`
+                    ),
+                  ],
+                ]
+              : []),
           ]
         : []),
     ];
@@ -2276,12 +2295,16 @@ bot.action(/^color_([🟢🔵🟡🔴🟣🟠🟥🔈]+)(?::(\d+):(\d+))?$/, asy
                 `show_translate:true:${surah}:${ayah}`
               ),
             ],
-            [
-              Markup.button.callback(
-                "📘 Показать тафсир",
-                `show_tafsir:true:${surah}:${ayah}`
-              ),
-            ],
+            ...(hasTafsirInfo
+              ? [
+                  [
+                    Markup.button.callback(
+                      "📘 Показать тафсир",
+                      `show_tafsir:true:${surah}:${ayah}`
+                    ),
+                  ],
+                ]
+              : []),
           ]
         : []),
     ];
