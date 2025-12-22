@@ -887,7 +887,9 @@ function getNavigationKeyboard(surah, ayah, tafsir = true) {
       keyboard.push([
         {
           text: "📘 Перейти к тафсиру",
-          callback_data: `show_tafsir_reply:${surah}:${ayah}`,
+          callback_data: `show_tafsir:true:${surah}:${ayah}:${
+            userData.currentTafsirPage + 1
+          }`,
         },
       ]);
     }
@@ -934,26 +936,71 @@ async function showTranslation(ctx, surah, ayah, reply = false) {
     // Сохраняем полный перевод в сессии
     userData.fullTranslation = translationText;
 
-    // Берем первые 512 символов для первого сообщения
     const maxFirstPartLength = 512;
+    const minSecondPartLength = 150; // Минимальный осмысленный остаток
+
     let firstPart = translationText;
     let hasMore = false;
 
     if (translationText.length > maxFirstPartLength) {
-      // Ищем хорошее место для обрыва (после точки, запятой или пробела)
+      // Ищем хорошее место для обрыва, но также проверяем остаток
       let cutIndex = maxFirstPartLength;
+
+      // Ищем разделитель в пределах 50 символов до/после лимита
       for (
         let i = maxFirstPartLength;
-        i > maxFirstPartLength - 100 && i > 0;
+        i > maxFirstPartLength - 50 && i > 0;
         i--
       ) {
-        if ([".", ",", ";", "!", "?", " "].includes(translationText[i])) {
+        if ([".", "!", "?", ";", "\n", " "].includes(translationText[i])) {
           cutIndex = i + 1;
           break;
         }
       }
-      firstPart = translationText.substring(0, cutIndex) + "...";
-      hasMore = true;
+
+      // Если не нашли разделитель, ищем вперед
+      if (cutIndex === maxFirstPartLength) {
+        for (
+          let i = maxFirstPartLength;
+          i < maxFirstPartLength + 50 && i < translationText.length;
+          i++
+        ) {
+          if ([".", "!", "?", ";", "\n", " "].includes(translationText[i])) {
+            cutIndex = i + 1;
+            break;
+          }
+        }
+      }
+
+      // Проверяем, сколько останется после разреза
+      const remainingLength = translationText.length - cutIndex;
+
+      // Если остаток слишком маленький - не делим вообще
+      if (remainingLength < minSecondPartLength) {
+        firstPart = translationText;
+        hasMore = false;
+      } else {
+        // Ищем еще лучшее место, если остаток маловат
+        if (remainingLength < 200) {
+          // Пробуем сдвинуть точку разреза, чтобы остаток был более осмысленным
+          let betterCutIndex = cutIndex;
+          const targetRemaining = 200; // Целевой размер остатка
+
+          for (let i = cutIndex; i > cutIndex - 100 && i > 0; i--) {
+            if ([".", "!", "?", ";", "\n"].includes(translationText[i])) {
+              const potentialRemaining = translationText.length - (i + 1);
+              if (potentialRemaining >= targetRemaining) {
+                betterCutIndex = i + 1;
+                break;
+              }
+            }
+          }
+          cutIndex = betterCutIndex;
+        }
+
+        firstPart = translationText.substring(0, cutIndex) + "...";
+        hasMore = true;
+      }
     }
 
     // Формируем сообщение
@@ -1015,7 +1062,7 @@ _${firstPart}_
       keyboard.inline_keyboard.push([
         {
           text: "📘 Показать тафсир",
-          callback_data: `show_tafsir_reply:${surah}:${ayah}`,
+          callback_data: `show_tafsir:true:${surah}:${ayah}`,
         },
       ]);
 
@@ -1097,7 +1144,7 @@ _${firstPart}_
   }
 }
 
-async function showTafsir(ctx, reply = false) {
+async function showTafsir(ctx, surah, ayah, currentPage = 0, reply = false) {
   try {
     await ctx.answerCbQuery("Загружаю тафсир...");
     const userData = getUserData(ctx.from.id);
@@ -1106,12 +1153,10 @@ async function showTafsir(ctx, reply = false) {
       await ctx.editMessageReplyMarkup();
     }
 
-    const surah = parseInt(userData.track);
-    const ayah = parseInt(userData.text);
-    const surahInfo = surahs[Number(userData.track) - 1] || {};
+    const surahInfo = surahs[Number(surah) - 1] || {};
 
     userData.tafsirParts = [];
-    userData.currentTafsirPage = 0;
+    userData.currentTafsirPage = currentPage;
 
     let tafsir = formatNumberedText(await getCachedTafsir(surah, ayah));
 
@@ -1201,13 +1246,14 @@ async function showTafsir(ctx, reply = false) {
     }
 
     const keyboard =
-      userData.tafsirParts.length > 1
+      userData.tafsirParts.length > 1 &&
+      userData.currentTafsirPage < userData.tafsirParts.length - 1
         ? {
             inline_keyboard: [
               [
                 {
                   text: "📖 Продолжение тафсира",
-                  callback_data: "tafsir_next",
+                  callback_data: `tafsir_next:false:${surah}:${ayah}:${userData.currentTafsirPage}`,
                 },
               ],
             ],
@@ -1215,7 +1261,7 @@ async function showTafsir(ctx, reply = false) {
         : getNavigationKeyboard(surah, ayah, false);
 
     // Формируем первое сообщение
-    const firstPartText = userData.tafsirParts[0];
+    const firstPartText = userData.tafsirParts[userData.currentTafsirPage];
     const hasMore = userData.tafsirParts.length > 1;
 
     const message = `
@@ -1227,7 +1273,13 @@ async function showTafsir(ctx, reply = false) {
 💬 *Толкование:*
 ${firstPartText}${hasMore ? "..." : ""}
 
-${hasMore ? `📄 _Часть 1 из ${userData.tafsirParts.length}_` : ""}
+${
+  hasMore
+    ? `📄 _Часть ${userData.currentTafsirPage + 1} из ${
+        userData.tafsirParts.length
+      }_`
+    : ""
+}
 `;
 
     if (reply) {
@@ -2270,6 +2322,16 @@ bot.action(/^color_([🟢🔵🟡🔴🟣🟠🟥🔈]+)(?::(\d+):(\d+))?$/, asy
       ...(isOneAyah
         ? [
             [
+              {
+                text: "⬅️ Пред.аят",
+                callback_data: `prev_translation_ayah:${surah}:${ayah - 1}`,
+              },
+              {
+                text: "След.аят ➡️",
+                callback_data: `next_translation_ayah:${surah}:${ayah + 1}`,
+              },
+            ],
+            [
               Markup.button.callback(
                 "📕 Показать перевод",
                 `show_translate:true:${surah}:${ayah}`
@@ -2293,6 +2355,16 @@ bot.action(/^color_([🟢🔵🟡🔴🟣🟠🟥🔈]+)(?::(\d+):(\d+))?$/, asy
     const userKeyboard = [
       ...(isOneAyah
         ? [
+            [
+              {
+                text: "⬅️ Пред.аят",
+                callback_data: `prev_translation_ayah:${surah}:${ayah - 1}`,
+              },
+              {
+                text: "След.аят ➡️",
+                callback_data: `next_translation_ayah:${surah}:${ayah + 1}`,
+              },
+            ],
             [
               Markup.button.callback(
                 "📕 Показать перевод",
@@ -2492,7 +2564,7 @@ _${translationResult}_
           [
             {
               text: "📘 Перейти к тафсиру",
-              callback_data: `show_tafsir_reply:${surah}:${ayah}`,
+              callback_data: `show_tafsir:true:${surah}:${ayah}`,
             },
           ],
         ],
@@ -2625,7 +2697,7 @@ bot.action(/show_tafsir:(true|false):(\d+):(\d+)/, async (ctx) => {
     userData.track = surah;
     userData.text = ayah.toString();
 
-    await showTafsir(ctx, flag);
+    await showTafsir(ctx, surah, ayah, 0, flag);
 
     analytics.trackEvent(ctx.from.id, "tafsir_viewed", {
       surah,
@@ -2637,44 +2709,30 @@ bot.action(/show_tafsir:(true|false):(\d+):(\d+)/, async (ctx) => {
   }
 });
 
-bot.action(/show_tafsir_reply:(\d+):(\d+)/, async (ctx) => {
-  try {
-    const surah = parseInt(ctx.match[1]);
-    const ayah = parseInt(ctx.match[2]);
-
-    // Обновляем сессию
-    const userData = getUserData(ctx.from.id);
-    userData.track = surah;
-    userData.text = ayah.toString();
-
-    await showTafsir(ctx, true);
-
-    analytics.trackEvent(ctx.from.id, "tafsir_viewed_from_translation", {
-      surah,
-      ayah,
-    });
-  } catch (error) {
-    logger.error("Error in show_tafsir_reply action:", error);
-    ctx.reply("Ошибка при показе тафсира.");
-  }
-});
-
 // Следующая часть тафсира
-bot.action("tafsir_next", async (ctx) => {
+bot.action(/tafsir_next:(true|false):(\d+):(\d+):(\d+)/, async (ctx) => {
   try {
+    const flag = ctx.match[1] === "true";
+    const surah = parseInt(ctx.match[2]);
+    const ayah = parseInt(ctx.match[3]);
+    const currentPage = parseInt(ctx.match[4]);
     const userData = getUserData(ctx.from.id);
 
-    if (!userData.tafsirParts || userData.tafsirParts.length === 0) {
-      await ctx.answerCbQuery("❌ Данные тафсира не найдены. Начните заново.");
+    if (userData.tafsirParts.length === 0) {
+      await showTafsir(ctx, surah, ayah, currentPage + 1, true);
       return;
     }
+
+    await ctx.editMessageReplyMarkup();
+    await ctx.answerCbQuery("Загружаю продолжение тафсира...");
 
     if (userData.currentTafsirPage >= userData.tafsirParts.length - 1) {
       await ctx.answerCbQuery("✅ Вы прочитали весь тафсир!");
       return;
     }
 
-    await ctx.editMessageReplyMarkup();
+    if (!userData.currentTafsirPage) userData.currentTafsirPage = currentPage;
+
     userData.currentTafsirPage++;
 
     const hasMore =
@@ -2687,20 +2745,21 @@ bot.action("tafsir_next", async (ctx) => {
     const keyboard = hasMore
       ? {
           inline_keyboard: [
-            [{ text: "📖 Продолжение тафсира", callback_data: "tafsir_next" }],
+            [
+              {
+                text: "📖 Продолжение тафсира",
+                callback_data: `tafsir_next:${flag}:${surah}:${ayah}:${userData.currentTafsirPage}`,
+              },
+            ],
           ],
         }
-      : getNavigationKeyboard(
-          parseInt(userData.track),
-          parseInt(userData.text),
-          false
-        );
+      : getNavigationKeyboard(parseInt(surah), parseInt(ayah), flag);
 
     const message = `
 📘 *Тафсир ас-Са'ди* (продолжение)
 ━━━━━━━━━━━━━━━
-🕋 *Сура:* ${userData.track} ${surahInfo.name_ru || ""}
-🔹 *Аят:* ${userData.text}
+🕋 *Сура:* ${surah} ${surahInfo.name_ru || ""}
+🔹 *Аят:* ${ayah}
 
 💬 *Толкование:*
 ${currentPartText}${hasMore ? "..." : ""}
