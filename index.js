@@ -1158,7 +1158,7 @@ async function showTafsir(ctx, surah, ayah, currentPage = 0, reply = false) {
     userData.tafsirParts = [];
     userData.currentTafsirPage = currentPage;
 
-    let tafsir = formatNumberedText(await getCachedTafsir(surah, ayah));
+    let tafsir = await getCachedTafsir(surah, ayah);
 
     if (!tafsir) {
       tafsir = "⚠️ Для этого аята тафсира нет.";
