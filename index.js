@@ -1310,6 +1310,28 @@ ${
   }
 }
 
+async function surahListMessage(ctx) {
+  try {
+    const replyMessage = () => {
+      let surahList = "📖 <b>Список сур Корана:</b>\n\n";
+      surahs.forEach((surah) => {
+        surahList += `${surah.number}. ${surah.name_en} (${surah.ayahs}) /surah_${surah.number}\n`;
+      });
+      surahList += "\n<i>Нажмите на команду суры, чтобы выбрать её</i>";
+      return surahList;
+    };
+
+    const message = replyMessage();
+
+    ctx.reply(message, { parse_mode: "HTML" });
+
+    return;
+  } catch (error) {
+    logger.error("Error in surahListMessage:", error);
+    await ctx.reply("❌ Ошибка при загрузке списка сур.");
+  }
+}
+
 // ================ СИСТЕМА ОЧИСТКИ ПАМЯТИ ================
 const memoryManager = {
   cleanup: function () {
@@ -1384,6 +1406,28 @@ async function sendAlert(message, level = "ERROR") {
 }
 
 // ================ MIDDLEWARE ДЛЯ ЛОГИРОВАНИЯ И ЛИМИТОВ ================
+bot.use((ctx, next) => {
+  try {
+    // Проверяем, есть ли текстовое сообщение
+    if (ctx.message && ctx.message.text) {
+      // Если сообщение длиннее 50 символов
+      if (ctx.message.text.length > 50) {
+        // Просто возвращаем, не обрабатываем дальше
+        logger.info(
+          `Сообщение пользователя ${ctx.from?.id} пропущено из-за длины > 50 символов.`
+        );
+        return;
+      }
+    }
+
+    // Если сообщение не текстовое или короче 50 символов, продолжаем обработку
+    return next();
+  } catch (error) {
+    logger.error("Error in length check middleware:", error);
+    return next();
+  }
+});
+
 bot.use(async (ctx, next) => {
   try {
     const userId = ctx.from?.id;
@@ -1692,23 +1736,34 @@ _${surah.name_en}_
 });
 
 // Выбор суры
-bot.command("surah", (ctx) => {
+bot.hears(/^\/surah(?:_(\d+))?\s*(\d+)?$/, async (ctx) => {
   try {
     const userData = getUserData(ctx.from.id);
-    const newTrack = ctx.message.text.replace("/surah", "").trim();
+    const match = ctx.match;
 
-    if (!newTrack || isNaN(newTrack)) {
-      return ctx.reply("Укажите номер суры, например: /surah 5");
+    // match[1] - для /surah_1 (с подчеркиванием)
+    // match[2] - для /surah 1 (с пробелом)
+    let surahNum = null;
+
+    if (match[1]) {
+      surahNum = parseInt(match[1]); // Формат /surah_1
+    } else if (match[2]) {
+      surahNum = parseInt(match[2]); // Формат /surah 1
     }
 
-    const surahNum = Number(newTrack);
+    // Если номер не найден, показываем список
+    if (!surahNum) {
+      await surahListMessage(ctx);
+      return;
+    }
 
+    // Проверяем диапазон
     if (surahNum < 1 || surahNum > 114) {
       return ctx.reply("Номер суры должен быть от 1 до 114");
     }
 
     userData.track = surahNum;
-    ctx.reply(`Выбрана сура ${surahNum}. Теперь отправьте номер аята.`);
+    await ctx.reply(`Выбрана сура ${surahNum}. Теперь отправьте номер аята.`);
     analytics.trackEvent(ctx.from.id, "surah_selected", { surah: surahNum });
   } catch (error) {
     logger.error("Error in surah command:", error);
@@ -2138,6 +2193,7 @@ bot.on("text", async (ctx) => {
 
         if (newText === "📖 Выбрать суру") {
           userData.button = true;
+
           return ctx.reply("Введите номер суры (от 1 до 114)");
         }
 
