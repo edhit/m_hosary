@@ -1008,7 +1008,7 @@ async function showTranslation(ctx, surah, ayah, reply = false) {
 📕 *Перевод Абу Аделя*
 ━━━━━━━━━━━━━━━
 🕋 *Сура:* ${surah} ${surahInfo.name_ru}
-🔹 *Аят:* ${ayah}
+🔹 *Аят:* ${ayah} / ${surahInfo.ayahs} 
 
 💬 *Перевод:*
 _${firstPart}_
@@ -2595,7 +2595,7 @@ bot.action(/show_translation_continue:(\d+):(\d+)/, async (ctx) => {
 📕 *Перевод Абу Аделя (полный текст)*
 ━━━━━━━━━━━━━━━
 🕋 *Сура:* ${surah} ${surahInfo.name_ru}
-🔹 *Аят:* ${ayah}
+🔹 *Аят:* ${ayah} / ${surahInfo.ayahs}
 
 💬 *Полный перевод:*
 _${translationResult}_
