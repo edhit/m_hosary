@@ -14,7 +14,10 @@ const Redis = require("ioredis");
 const surahs = require("./quran.json");
 const { mp3create, toGlobalAyah } = require("./mp3create");
 const { getTafsir, hasTafsir } = require("./db-tafsir");
-const { getAbuAdelTranslation } = require("./db-translations");
+const {
+  getAbuAdelTranslation,
+  getKulievTranslation,
+} = require("./db-translations");
 const { getAyahPhoto } = require("./db-ayah-photos");
 const { getValue } = require("./db-keys");
 
@@ -347,9 +350,9 @@ function isAdmin(userId) {
   }
 }
 
-function getCacheKey(type, surah, ayah) {
+function getCacheKey(type, surah, ayah, translate = "text") {
   try {
-    return `${type}_${surah}_${ayah}`;
+    return `${type}_${surah}_${ayah}_${translate}`;
   } catch (error) {
     logger.error("Error in getCacheKey:", error);
     return `error_${Date.now()}`;
@@ -603,9 +606,9 @@ async function getCachedTafsir(surah, ayah) {
   }
 }
 
-async function getCachedTranslation(surah, ayah) {
+async function getCachedTranslation(surah, ayah, translate = "abu_adel") {
   try {
-    const key = getCacheKey("translation", surah, ayah);
+    const key = getCacheKey("translation", surah, ayah, translate);
 
     if (FEATURE_FLAGS.redisCache) {
       const cached = await redisCache.get(key);
@@ -622,7 +625,12 @@ async function getCachedTranslation(surah, ayah) {
     }
 
     botStats.cacheMisses++;
-    const data = await getAbuAdelTranslation(surah, ayah);
+    let data;
+    if (translate === "kuliev") {
+      data = await getKulievTranslation(surah, ayah);
+    } else {
+      data = await getAbuAdelTranslation(surah, ayah);
+    }
 
     cache.set(key, { data, timestamp: Date.now() });
     if (FEATURE_FLAGS.redisCache) {
@@ -884,6 +892,7 @@ async function showTranslation(
     }
     const userData = getUserData(ctx.from.id);
     const surahInfo = surahs[surah - 1] || {};
+    const translate = userData.translate || "abu_adel";
 
     if (reply && afterText === false) {
       await ctx.editMessageReplyMarkup();
@@ -898,7 +907,7 @@ async function showTranslation(
 
     // Получаем перевод и фото параллельно
     let [translationResult, photoFileId] = await Promise.allSettled([
-      getCachedTranslation(surah, ayah),
+      getCachedTranslation(surah, ayah, translate),
       getAyahPhoto(surah, ayah),
     ]);
 
@@ -983,7 +992,7 @@ async function showTranslation(
 
     // Формируем сообщение
     const message = `
-📕 *Перевод Абу Аделя*
+📕 *Перевод ${translate === "abu_adel" ? "Абу Аделя" : "Кулиева"}*
 ━━━━━━━━━━━━━━━
 🕋 *Сура:* ${surah} ${surahInfo.name_ru}
 🔹 *Аят:* ${ayah} / ${surahInfo.ayahs} 
@@ -1025,6 +1034,15 @@ _${firstPart}_
     if (ayahNavigation.length > 0) {
       keyboard.inline_keyboard.push(ayahNavigation);
     }
+
+    keyboard.inline_keyboard.push([
+      {
+        text: `🔄 Перевод ${
+          translate === "abu_adel" ? "Кулиева" : "Абу Аделя"
+        }`,
+        callback_data: `change_translate:${surah}:${ayah}`,
+      },
+    ]);
 
     const hasTafsirInfo = await hasTafsir(surah, ayah);
 
@@ -1303,7 +1321,8 @@ async function surahListMessage(ctx) {
       surahs.forEach((surah) => {
         surahList += `${surah.number}. ${surah.name_en} (${surah.ayahs}) /surah_${surah.number}\n`;
       });
-      surahList += "\n<i>Нажмите на команду суры, чтобы выбрать её</i>";
+      surahList +=
+        "\n<i>Нажми на команду суры, чтобы выбрать её или введи номер</i>";
       return surahList;
     };
 
@@ -2227,7 +2246,8 @@ bot.on("text", async (ctx) => {
         if (newText === "📖 Выбрать суру") {
           userData.button = true;
 
-          return ctx.reply("Введите номер суры (от 1 до 114)");
+          await surahListMessage(ctx);
+          return;
         }
 
         //         if (newText === "📚 Начать заучивать") {
@@ -2655,16 +2675,20 @@ bot.action(/show_translation_continue:(\d+):(\d+)/, async (ctx) => {
     const ayah = parseInt(ctx.match[2]);
     const userData = getUserData(ctx.from.id);
 
+    const translate = userData.translate || "abu_adel";
+
     await ctx.answerCbQuery("Загружаю продолжение...");
     await ctx.editMessageReplyMarkup(); // Убираем кнопку
 
     // Получаем полный перевод
-    let translationResult = await getCachedTranslation(surah, ayah);
+    let translationResult = await getCachedTranslation(surah, ayah, translate);
     const surahInfo = surahs[surah - 1] || {};
 
     // Формируем полное сообщение
     const fullMessage = `
-📕 *Перевод Абу Аделя (полный текст)*
+📕 *Перевод ${
+      translate === "abu_adel" ? "Абу Аделя" : "Кулиева"
+    } (полный текст)*
 ━━━━━━━━━━━━━━━
 🕋 *Сура:* ${surah} ${surahInfo.name_ru}
 🔹 *Аят:* ${ayah} / ${surahInfo.ayahs}
@@ -2688,6 +2712,14 @@ _${translationResult}_
               callback_data: `next_translation_ayah:${surah}:${ayah + 1}`,
             },
           ],
+          [
+            {
+              text: `🔄 Перевод ${
+                translate === "abu_adel" ? "Кулиева" : "Абу Аделя"
+              }`,
+              callback_data: `change_translate:${surah}:${ayah}`,
+            },
+          ],
           [{ text: "🔈 Прослушать аят", callback_data: `color_🔈` }],
           [
             {
@@ -2704,7 +2736,6 @@ _${translationResult}_
         ],
       },
     });
-
 
     analytics.trackEvent(ctx.from.id, "translation_continue_viewed", {
       surah,
@@ -2915,6 +2946,29 @@ ${currentPartText}${hasMore ? "..." : ""}
   } catch (err) {
     logger.error("Error in tafsir_next action:", err);
     await ctx.answerCbQuery("❌ Ошибка при загрузке тафсира.");
+  }
+});
+
+bot.action(/change_translate:(\d+):(\d+)/, async (ctx) => {
+  try {
+    const surah = parseInt(ctx.match[1]);
+    const ayah = parseInt(ctx.match[2]);
+    const userData = getUserData(ctx.from.id);
+
+    const currentTranslate = userData.translate || "abu_adel";
+    userData.translate =
+      currentTranslate === "abu_adel" ? "kuliev" : "abu_adel";
+
+    await showTranslation(ctx, surah, ayah, false);
+
+    analytics.trackEvent(ctx.from.id, "translation_changed", {
+      surah,
+      ayah,
+      newTranslate: userData.translate,
+    });
+  } catch (error) {
+    logger.error("Error in change_translate action:", error);
+    ctx.reply("Ошибка при смене перевода.");
   }
 });
 

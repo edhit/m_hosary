@@ -22,6 +22,8 @@
     "dbKeys": "node database/dbKeys.js",
     "dbTafsir": "node database/dbTafsir.js",
     "dbAyahPhotos": "node database/dbAyahPhotos.js",
+    "dbUsers": "node db-users.js",
+
 
     "db:all-parallel": "npm run dbTranslations & npm run dbKeys & npm run dbTafsir & npm run dbAyahPhotos",
     "db:all-debug": "npm run dbTranslations --silent && echo '✓ Translations done' && npm run dbKeys --silent && echo '✓ Keys done' && npm run dbTafsir --silent && echo '✓ Tafsir done' && npm run dbAyahPhotos --silent && echo '✓ Ayah photos done' && echo '✅ All databases initialized!'",
