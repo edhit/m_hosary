@@ -781,37 +781,7 @@ async function finalizeAudio(ctx, userData) {
         ])
       );
     } else {
-      await ctx.reply(
-        "Аудио готово!",
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback(
-              "🔈 Прослушать аят",
-              `color_🔈:${surah}:${ayah}`
-            ),
-          ],
-          ...(isOneAyah
-            ? [
-                [
-                  Markup.button.callback(
-                    "📕 Показать перевод",
-                    `show_translate:false:${surah}:${ayah}`
-                  ),
-                ],
-                ...(hasTafsirInfo
-                  ? [
-                      [
-                        Markup.button.callback(
-                          "📘 Показать тафсир",
-                          `show_tafsir:false:${surah}:${ayah}`
-                        ),
-                      ],
-                    ]
-                  : []),
-              ]
-            : []),
-        ])
-      );
+      await showTranslation(ctx, surah, ayah, true, true);
     }
 
     botStats.successfulAudio++;
@@ -901,13 +871,21 @@ function getNavigationKeyboard(surah, ayah, tafsir = true) {
   }
 }
 
-async function showTranslation(ctx, surah, ayah, reply = false) {
+async function showTranslation(
+  ctx,
+  surah,
+  ayah,
+  reply = false,
+  afterText = false
+) {
   try {
-    await ctx.answerCbQuery("Загружаю перевод...");
+    if (afterText === false) {
+      await ctx.answerCbQuery("Загружаю перевод...");
+    }
     const userData = getUserData(ctx.from.id);
     const surahInfo = surahs[surah - 1] || {};
 
-    if (reply) {
+    if (reply && afterText === false) {
       await ctx.editMessageReplyMarkup();
     }
 
@@ -1066,6 +1044,13 @@ _${firstPart}_
         },
       ]);
 
+    keyboard.inline_keyboard.push([
+      {
+        text: "📤 Поделиться аятом",
+        callback_data: `show_share_link:${surah}:${ayah}`,
+      },
+    ]);
+
     // Если есть фото, отправляем его
     if (photoFileId.status === "fulfilled" && photoFileId.value) {
       try {
@@ -1132,8 +1117,9 @@ _${firstPart}_
     }
   } catch (err) {
     logger.error("Error in showTranslation:", err);
-    await ctx.answerCbQuery("❌ Ошибка загрузки перевода.");
-
+    if (afterText === false) {
+      await ctx.answerCbQuery("❌ Ошибка загрузки перевода.");
+    }
     if (reply) {
       await ctx.reply("Ошибка при загрузке перевода. Попробуйте позже.");
     } else {
@@ -1617,7 +1603,39 @@ bot.start(async (ctx) => {
     const name = ctx.from.first_name || "брат";
     const username = ctx.from.username || null;
 
-    // Создаем/обновляем пользователя сразу после команды /start
+    // Получаем параметры из deeplink (если есть)
+    const startPayload = ctx.message?.text?.split(" ")[1];
+    let surah = null;
+    let ayah = null;
+
+    // Обработка deeplink для быстрого перехода к аяту
+    if (startPayload) {
+      // Обрабатываем разные форматы параметров
+      const match1 = startPayload.match(/s(\d+)_a(\d+)/); // Формат s5_a20
+      const match2 = startPayload.match(/surah_(\d+)_ayah_(\d+)/); // Формат surah_5_ayah_20
+      const match3 = startPayload.match(/(\d+)_(\d+)/); // Формат 5_20
+
+      if (match1) {
+        surah = parseInt(match1[1]);
+        ayah = parseInt(match1[2]);
+      } else if (match2) {
+        surah = parseInt(match2[1]);
+        ayah = parseInt(match2[2]);
+      } else if (match3) {
+        surah = parseInt(match3[1]);
+        ayah = parseInt(match3[2]);
+      }
+
+      // Логируем использование deeplink
+      if (surah && ayah) {
+        logger.info(
+          `User ${userId} used deeplink: surah ${surah}, ayah ${ayah}`
+        );
+        analytics.trackEvent(userId, "deeplink_used", { surah, ayah });
+      }
+    }
+
+    // Создаем/обновляем пользователя
     if (FEATURE_FLAGS.usersDatabase) {
       try {
         await usersDB.upsertUser(
@@ -1638,6 +1656,19 @@ bot.start(async (ctx) => {
     // Также создаем сессию в памяти
     const userData = sessionManager.getSession(userId);
 
+    // Если есть параметры deeflink - сразу показываем аят
+    if (surah && ayah) {
+      // Сохраняем контекст для возврата
+      userData.lastCommand = "start_deeplink";
+      userData.lastSurah = surah;
+      userData.lastAyah = ayah;
+
+      // Показываем аят
+      await showTranslation(ctx, surah, ayah, true, true);
+      return; // Не показываем приветственное сообщение
+    }
+
+    // Стандартное приветствие (только если не было deeplink)
     await ctx.reply(MESSAGE_TEMPLATES.welcome(name), {
       reply_markup: {
         keyboard: [
@@ -1740,6 +1771,8 @@ bot.hears(/^\/surah(?:_(\d+))?\s*(\d+)?$/, async (ctx) => {
   try {
     const userData = getUserData(ctx.from.id);
     const match = ctx.match;
+
+    userData.button = null; // Сбрасываем кнопку выбора
 
     // match[1] - для /surah_1 (с подчеркиванием)
     // match[2] - для /surah 1 (с пробелом)
@@ -2314,6 +2347,45 @@ bot.on("text", async (ctx) => {
 // ================ ОБРАБОТЧИКИ КОЛБЭКОВ ================
 
 // ================ УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ЦВЕТА ================
+bot.action(/^show_share_link:(\d+):(\d+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery("Создаю ссылку...");
+    await ctx.editMessageReplyMarkup();
+
+    const surah = parseInt(ctx.match[1]);
+    const ayah = parseInt(ctx.match[2]);
+
+    // Формируем ссылку
+    const shareLink = `https://t.me/${ctx.botInfo.username}?start=s${surah}_a${ayah}`;
+    const message =
+      `🔗 *Ссылка на аят:*\n\n` +
+      `Сура ${surah}, Аят ${ayah}\n\n` +
+      `Для быстрого перехода к этому аяту скопируйте ссылку ниже:\n\n` +
+      `\`${shareLink}\`\n\n` +
+      `Или просто нажмите на нее, чтобы открыть.`;
+
+    await ctx.answerCbQuery(); // Скрыть уведомление "часики"
+
+    // Отправляем сообщение с ссылкой
+    await ctx.reply(message, {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: "⬅️ Назад",
+              callback_data: `prev_translation_ayah:${surah}:${ayah}`,
+            },
+          ],
+        ],
+      },
+    });
+  } catch (error) {
+    logger.error("Error in show_share_link:", error);
+    await ctx.answerCbQuery("Ошибка при создании ссылки", { show_alert: true });
+  }
+});
+
 bot.action(/^color_([🟢🔵🟡🔴🟣🟠🟥🔈]+)(?::(\d+):(\d+))?$/, async (ctx) => {
   try {
     await ctx.answerCbQuery("Загружаю аят...");
@@ -2623,9 +2695,16 @@ _${translationResult}_
               callback_data: `show_tafsir:true:${surah}:${ayah}`,
             },
           ],
+          [
+            {
+              text: "📤 Поделиться аятом",
+              callback_data: `show_share_link:${surah}:${ayah}`,
+            },
+          ],
         ],
       },
     });
+
 
     analytics.trackEvent(ctx.from.id, "translation_continue_viewed", {
       surah,
