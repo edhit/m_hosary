@@ -13,8 +13,11 @@ const Redis = require("ioredis");
 // Импорт данных и модулей
 const surahs = require("./quran.json");
 const { mp3create, toGlobalAyah } = require("./mp3create");
-const { getTafsir } = require("./db-tafsir");
-const { getAbuAdelTranslation } = require("./db-translations");
+const { getTafsir, hasTafsir } = require("./db-tafsir");
+const {
+  getAbuAdelTranslation,
+  getKulievTranslation,
+} = require("./db-translations");
 const { getAyahPhoto } = require("./db-ayah-photos");
 const { getValue } = require("./db-keys");
 
@@ -25,6 +28,7 @@ const redisLimiter = require("./redis-limits");
 // ================ КОНСТАНТЫ И КОНФИГУРАЦИЯ ================
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL;
+const GROUP_ID = process.env.GROUP;
 const TEMP_FOLDER = process.env.TEMP_FOLDER || path.resolve("./temp");
 const DATA_FILE = path.resolve("./audio_data.json");
 const BACKUP_FOLDER = path.resolve("./backups");
@@ -68,13 +72,13 @@ const logger = winston.createLogger({
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.errors({ stack: true }),
-    winston.format.json()
+    winston.format.json(),
   ),
   transports: [
     new winston.transports.Console({
       format: winston.format.combine(
         winston.format.colorize(),
-        winston.format.simple()
+        winston.format.simple(),
       ),
     }),
     new winston.transports.File({
@@ -186,7 +190,7 @@ class RedisCache {
       await redisClient.setex(
         this.prefix + key,
         Math.floor(ttl / 1000),
-        JSON.stringify(value)
+        JSON.stringify(value),
       );
     } catch (error) {
       logger.error("Redis set error:", error);
@@ -308,7 +312,7 @@ class SessionManager {
   addToProcessingQueue(userId) {
     if (this.processingQueue.has(userId)) {
       throw new Error(
-        "⏳ Ваш предыдущий запрос еще обрабатывается. Подождите..."
+        "⏳ Ваш предыдущий запрос еще обрабатывается. Подождите...",
       );
     }
     this.processingQueue.set(userId, { startTime: Date.now() });
@@ -337,6 +341,7 @@ function getUserData(userId) {
 
 // ================ УТИЛИТЫ ================
 function isAdmin(userId) {
+  logger.info(`Checking admin status for userId: ${userId}`);
   try {
     if (!ADMIN_USER_ID) return false;
     const adminIds = ADMIN_USER_ID.split(",").map((id) => id.trim());
@@ -347,9 +352,9 @@ function isAdmin(userId) {
   }
 }
 
-function getCacheKey(type, surah, ayah) {
+function getCacheKey(type, surah, ayah, translate = "text") {
   try {
-    return `${type}_${surah}_${ayah}`;
+    return `${type}_${surah}_${ayah}_${translate}`;
   } catch (error) {
     logger.error("Error in getCacheKey:", error);
     return `error_${Date.now()}`;
@@ -481,6 +486,17 @@ function formatNumberedText(text) {
   }
 }
 
+function shareLink(ctx, surah, ayah, urlonly = false) {
+  const baseUrl = `https://t.me/${ctx.botInfo.username}?start=s${surah}_a${ayah}`;
+  const message =
+    `🔗 <b>Ссылка на аят:</b>\n\n` +
+    `Сура ${surah}, Аят ${ayah}\n\n` +
+    `Для быстрого перехода к этому аяту скопируйте ссылку ниже:\n\n` +
+    `${baseUrl}\n\n` +
+    `Или просто нажмите на нее, чтобы открыть.`;
+  return urlonly ? baseUrl : message;
+}
+
 function getAudioInput(audioPath) {
   // file_id — чистая строка БЕЗ слешей и БЕЗ http
   if (
@@ -520,7 +536,7 @@ async function ensureUserExists(userId, firstName, username) {
       // Создаем нового пользователя
       await usersDB.upsertUser(userId, firstName || "User", username);
       logger.info(
-        `New user created: ${userId} (@${username || "no-username"})`
+        `New user created: ${userId} (@${username || "no-username"})`,
       );
       return true;
     } else {
@@ -528,7 +544,7 @@ async function ensureUserExists(userId, firstName, username) {
       await usersDB.upsertUser(
         userId,
         firstName || existingUser.first_name,
-        username
+        username,
       );
       return false;
     }
@@ -603,9 +619,9 @@ async function getCachedTafsir(surah, ayah) {
   }
 }
 
-async function getCachedTranslation(surah, ayah) {
+async function getCachedTranslation(surah, ayah, translate = "abu_adel") {
   try {
-    const key = getCacheKey("translation", surah, ayah);
+    const key = getCacheKey("translation", surah, ayah, translate);
 
     if (FEATURE_FLAGS.redisCache) {
       const cached = await redisCache.get(key);
@@ -622,7 +638,12 @@ async function getCachedTranslation(surah, ayah) {
     }
 
     botStats.cacheMisses++;
-    const data = await getAbuAdelTranslation(surah, ayah);
+    let data;
+    if (translate === "kuliev") {
+      data = await getKulievTranslation(surah, ayah);
+    } else {
+      data = await getAbuAdelTranslation(surah, ayah);
+    }
 
     cache.set(key, { data, timestamp: Date.now() });
     if (FEATURE_FLAGS.redisCache) {
@@ -662,7 +683,7 @@ async function retryWithBackoff(operation, maxRetries = 3, baseDelay = 1000) {
       const delay = baseDelay * Math.pow(2, attempt - 1);
       const jitter = delay * 0.1 * Math.random();
       logger.warn(
-        `Retry attempt ${attempt} after ${Math.round(delay + jitter)}ms`
+        `Retry attempt ${attempt} after ${Math.round(delay + jitter)}ms`,
       );
       await new Promise((resolve) => setTimeout(resolve, delay + jitter));
     }
@@ -738,69 +759,58 @@ const audioQuality = {
 async function finalizeAudio(ctx, userData) {
   try {
     const isOneAyah = userData.text && /^\d+$/.test(userData.text.trim());
+    const surah = parseInt(userData.track);
+    const ayah = parseInt(userData.text);
+
+    const hasTafsirInfo = await hasTafsir(surah, ayah);
 
     if (isAdmin(ctx.from.id)) {
       await ctx.reply(
         "Выберите цвет перед подтверждением:",
         Markup.inlineKeyboard([
           [
-            Markup.button.callback("🔵", "color_🔵"),
-            Markup.button.callback("🟢", "color_🟢"),
-            Markup.button.callback("🔴", "color_🔴"),
-            Markup.button.callback("🟡", "color_🟡"),
+            Markup.button.callback("🔵", `color_🔵:${surah}:${ayah}`),
+            Markup.button.callback("🟢", `color_🟢:${surah}:${ayah}`),
+            Markup.button.callback("🔴", `color_🔴:${surah}:${ayah}`),
+            Markup.button.callback("🟡", `color_🟡:${surah}:${ayah}`),
           ],
           [
-            Markup.button.callback("🟣", "color_🟣"),
-            Markup.button.callback("🟠", "color_🟠"),
-            Markup.button.callback("🟥", "color_🟥"),
+            Markup.button.callback("🟣", `color_🟣:${surah}:${ayah}`),
+            Markup.button.callback("🟠", `color_🟠:${surah}:${ayah}`),
+            Markup.button.callback("🟥", `color_🟥:${surah}:${ayah}`),
           ],
           ...(isOneAyah
             ? [
                 [
                   Markup.button.callback(
                     "📕 Показать перевод",
-                    "show_translate:false"
+                    `show_translate:false:${surah}:${ayah}`,
                   ),
                 ],
-                [
-                  Markup.button.callback(
-                    "📘 Показать тафсир",
-                    "show_tafsir:false"
-                  ),
-                ],
+                ...(hasTafsirInfo
+                  ? [
+                      [
+                        Markup.button.callback(
+                          "📘 Показать тафсир",
+                          `show_tafsir:false:${surah}:${ayah}`,
+                        ),
+                      ],
+                    ]
+                  : []),
               ]
             : []),
-        ])
+          [],
+        ]),
       );
     } else {
-      await ctx.reply(
-        "Аудио готово!",
-        Markup.inlineKeyboard([
-          [Markup.button.callback("🔈 Прослушать аят", "color_🔈")],
-          ...(isOneAyah
-            ? [
-                [
-                  Markup.button.callback(
-                    "📕 Показать перевод",
-                    "show_translate:false"
-                  ),
-                ],
-                [
-                  Markup.button.callback(
-                    "📘 Показать тафсир",
-                    "show_tafsir:false"
-                  ),
-                ],
-              ]
-            : []),
-        ])
-      );
+      await showTranslation(ctx, surah, ayah, true, true);
     }
 
     botStats.successfulAudio++;
     return true;
   } catch (error) {
     logger.error("finalizeAudio error:", error);
+    return false;
   }
 }
 
@@ -837,14 +847,18 @@ function getNavigationKeyboard(surah, ayah, tafsir = true) {
     if (ayah > 1) {
       buttons.push({
         text: "⬅️ Пред.аят",
-        callback_data: tafsir ? `prev_ayah:false` : `prev_ayah:true`,
+        callback_data: tafsir
+          ? `prev_ayah:${surah}:${ayah - 1}:false`
+          : `prev_ayah:${surah}:${ayah - 1}:true`,
       });
     }
 
     if (surahInfo && ayah < surahInfo.ayahs) {
       buttons.push({
         text: "След.аят ➡️",
-        callback_data: tafsir ? `next_ayah:false` : `next_ayah:true`,
+        callback_data: tafsir
+          ? `next_ayah:${surah}:${ayah + 1}:false`
+          : `next_ayah:${surah}:${ayah + 1}:true`,
       });
     }
 
@@ -853,11 +867,22 @@ function getNavigationKeyboard(surah, ayah, tafsir = true) {
       keyboard.push(buttons);
     }
 
-    keyboard.push([{ text: "🔈 Прослушать аят", callback_data: `color_🔈` }]);
+    // Используем новый формат: только эмодзи кружка + сура и аят
+    keyboard.push([
+      {
+        text: "🔈 Прослушать аят",
+        callback_data: `color_🔈:${surah}:${ayah}`,
+      },
+    ]);
 
     if (tafsir) {
       keyboard.push([
-        { text: "📘 Перейти к тафсиру", callback_data: `show_tafsir_reply` },
+        {
+          text: "📘 Перейти к тафсиру",
+          callback_data: `show_tafsir:true:${surah}:${ayah}:${
+            userData.currentTafsirPage + 1
+          }`,
+        },
       ]);
     }
 
@@ -868,13 +893,22 @@ function getNavigationKeyboard(surah, ayah, tafsir = true) {
   }
 }
 
-async function showTranslation(ctx, surah, ayah, reply = false) {
+async function showTranslation(
+  ctx,
+  surah,
+  ayah,
+  reply = false,
+  afterText = false,
+) {
   try {
-    await ctx.answerCbQuery("Загружаю перевод...");
+    if (afterText === false) {
+      await ctx.answerCbQuery("Загружаю перевод...");
+    }
     const userData = getUserData(ctx.from.id);
     const surahInfo = surahs[surah - 1] || {};
+    const translate = userData.translate || "abu_adel";
 
-    if (reply) {
+    if (reply && afterText === false) {
       await ctx.editMessageReplyMarkup();
     }
 
@@ -887,7 +921,7 @@ async function showTranslation(ctx, surah, ayah, reply = false) {
 
     // Получаем перевод и фото параллельно
     let [translationResult, photoFileId] = await Promise.allSettled([
-      getCachedTranslation(surah, ayah),
+      getCachedTranslation(surah, ayah, translate),
       getAyahPhoto(surah, ayah),
     ]);
 
@@ -903,37 +937,82 @@ async function showTranslation(ctx, surah, ayah, reply = false) {
     // Сохраняем полный перевод в сессии
     userData.fullTranslation = translationText;
 
-    // Берем первые 512 символов для первого сообщения
     const maxFirstPartLength = 512;
+    const minSecondPartLength = 150; // Минимальный осмысленный остаток
+
     let firstPart = translationText;
     let hasMore = false;
 
     if (translationText.length > maxFirstPartLength) {
-      // Ищем хорошее место для обрыва (после точки, запятой или пробела)
+      // Ищем хорошее место для обрыва, но также проверяем остаток
       let cutIndex = maxFirstPartLength;
+
+      // Ищем разделитель в пределах 50 символов до/после лимита
       for (
         let i = maxFirstPartLength;
-        i > maxFirstPartLength - 100 && i > 0;
+        i > maxFirstPartLength - 50 && i > 0;
         i--
       ) {
-        if ([".", ",", ";", "!", "?", " "].includes(translationText[i])) {
+        if ([".", "!", "?", ";", "\n", " "].includes(translationText[i])) {
           cutIndex = i + 1;
           break;
         }
       }
-      firstPart = translationText.substring(0, cutIndex) + "...";
-      hasMore = true;
+
+      // Если не нашли разделитель, ищем вперед
+      if (cutIndex === maxFirstPartLength) {
+        for (
+          let i = maxFirstPartLength;
+          i < maxFirstPartLength + 50 && i < translationText.length;
+          i++
+        ) {
+          if ([".", "!", "?", ";", "\n", " "].includes(translationText[i])) {
+            cutIndex = i + 1;
+            break;
+          }
+        }
+      }
+
+      // Проверяем, сколько останется после разреза
+      const remainingLength = translationText.length - cutIndex;
+
+      // Если остаток слишком маленький - не делим вообще
+      if (remainingLength < minSecondPartLength) {
+        firstPart = translationText;
+        hasMore = false;
+      } else {
+        // Ищем еще лучшее место, если остаток маловат
+        if (remainingLength < 200) {
+          // Пробуем сдвинуть точку разреза, чтобы остаток был более осмысленным
+          let betterCutIndex = cutIndex;
+          const targetRemaining = 200; // Целевой размер остатка
+
+          for (let i = cutIndex; i > cutIndex - 100 && i > 0; i--) {
+            if ([".", "!", "?", ";", "\n"].includes(translationText[i])) {
+              const potentialRemaining = translationText.length - (i + 1);
+              if (potentialRemaining >= targetRemaining) {
+                betterCutIndex = i + 1;
+                break;
+              }
+            }
+          }
+          cutIndex = betterCutIndex;
+        }
+
+        firstPart = translationText.substring(0, cutIndex) + "...";
+        hasMore = true;
+      }
     }
 
     // Формируем сообщение
     const message = `
-📕 *Перевод Абу Аделя*
+📕 <b>Перевод ${translate === "abu_adel" ? "Абу Аделя" : "Кулиева"}</b>
 ━━━━━━━━━━━━━━━
-🕋 *Сура:* ${surah} ${surahInfo.name_ru}
-🔹 *Аят:* ${ayah}
+🕋 <b>Сура:</b> ${surah} ${surahInfo.name_ru}
+🔹 <b>Аят:</b> ${ayah} / ${surahInfo.ayahs} 
 
-💬 *Перевод:*
-_${firstPart}_
+💬 <b>Перевод:</b>
+<i>${firstPart}</i>
 `;
 
     // Создаем клавиатуру
@@ -955,14 +1034,14 @@ _${firstPart}_
     if (ayah > 1) {
       ayahNavigation.push({
         text: "⬅️ Пред.аят",
-        callback_data: `prev_translation_ayah`,
+        callback_data: `prev_translation_ayah:${surah}:${ayah - 1}`,
       });
     }
 
     if (surahInfo && ayah < surahInfo.ayahs) {
       ayahNavigation.push({
         text: "След.аят ➡️",
-        callback_data: `next_translation_ayah`,
+        callback_data: `next_translation_ayah:${surah}:${ayah + 1}`,
       });
     }
 
@@ -970,13 +1049,38 @@ _${firstPart}_
       keyboard.inline_keyboard.push(ayahNavigation);
     }
 
-    // Кнопка прослушивания и перехода к тафсиру
     keyboard.inline_keyboard.push([
-      { text: "🔈 Прослушать аят", callback_data: `color_🔈` },
+      {
+        text: `🔄 Перевод ${
+          translate === "abu_adel" ? "Кулиева" : "Абу Аделя"
+        }`,
+        callback_data: `change_translate:${surah}:${ayah}`,
+      },
     ]);
 
+    const hasTafsirInfo = await hasTafsir(surah, ayah);
+
+    // Кнопка прослушивания - только эмодзи кружка + сура и аят
     keyboard.inline_keyboard.push([
-      { text: "📘 Перейти к тафсиру", callback_data: `show_tafsir_reply` },
+      {
+        text: "🔈 Прослушать аят",
+        callback_data: `color_🔈:${surah}:${ayah}`,
+      },
+    ]);
+
+    if (hasTafsirInfo)
+      keyboard.inline_keyboard.push([
+        {
+          text: "📘 Показать тафсир",
+          callback_data: `show_tafsir:true:${surah}:${ayah}`,
+        },
+      ]);
+
+    keyboard.inline_keyboard.push([
+      {
+        text: "📤 Поделиться аятом",
+        callback_data: `show_share_link:${surah}:${ayah}`,
+      },
     ]);
 
     // Если есть фото, отправляем его
@@ -986,7 +1090,7 @@ _${firstPart}_
           // Отправляем фото с подписью и клавиатурой
           await ctx.replyWithPhoto(photoFileId.value, {
             caption: message,
-            parse_mode: "Markdown",
+            parse_mode: "HTML",
             reply_markup: keyboard,
           });
         } else {
@@ -996,11 +1100,11 @@ _${firstPart}_
               type: "photo",
               media: photoFileId.value,
               caption: message,
-              parse_mode: "Markdown",
+              parse_mode: "HTML",
             },
             {
               reply_markup: keyboard,
-            }
+            },
           );
         }
 
@@ -1011,12 +1115,12 @@ _${firstPart}_
         // Если ошибка с фото, отправляем только текст
         if (reply) {
           await ctx.reply(message, {
-            parse_mode: "Markdown",
+            parse_mode: "HTML",
             reply_markup: keyboard,
           });
         } else {
           await ctx.editMessageText(message, {
-            parse_mode: "Markdown",
+            parse_mode: "HTML",
             reply_markup: keyboard,
           });
         }
@@ -1025,12 +1129,12 @@ _${firstPart}_
       // Если фото нет, отправляем только текст
       if (reply) {
         await ctx.reply(message, {
-          parse_mode: "Markdown",
+          parse_mode: "HTML",
           reply_markup: keyboard,
         });
       } else {
         await ctx.editMessageText(message, {
-          parse_mode: "Markdown",
+          parse_mode: "HTML",
           reply_markup: keyboard,
         });
       }
@@ -1039,25 +1143,26 @@ _${firstPart}_
       if (photoFileId.status === "rejected") {
         logger.warn(
           `Photo not found for surah ${surah}, ayah ${ayah}:`,
-          photoFileId.reason
+          photoFileId.reason,
         );
       }
     }
   } catch (err) {
     logger.error("Error in showTranslation:", err);
-    await ctx.answerCbQuery("❌ Ошибка загрузки перевода.");
-
+    if (afterText === false) {
+      await ctx.answerCbQuery("❌ Ошибка загрузки перевода.");
+    }
     if (reply) {
       await ctx.reply("Ошибка при загрузке перевода. Попробуйте позже.");
     } else {
       await ctx.editMessageText(
-        "Ошибка при загрузке перевода. Попробуйте позже."
+        "Ошибка при загрузке перевода. Попробуйте позже.",
       );
     }
   }
 }
 
-async function showTafsir(ctx, reply = false) {
+async function showTafsir(ctx, surah, ayah, currentPage = 0, reply = false) {
   try {
     await ctx.answerCbQuery("Загружаю тафсир...");
     const userData = getUserData(ctx.from.id);
@@ -1066,32 +1171,89 @@ async function showTafsir(ctx, reply = false) {
       await ctx.editMessageReplyMarkup();
     }
 
-    const surah = parseInt(userData.track);
-    const ayah = parseInt(userData.text);
-    const surahInfo = surahs[Number(userData.track) - 1] || {};
+    const surahInfo = surahs[Number(surah) - 1] || {};
 
     userData.tafsirParts = [];
-    userData.currentTafsirPage = 0;
+    userData.currentTafsirPage = currentPage;
 
-    let tafsir = formatNumberedText(await getCachedTafsir(surah, ayah));
+    let tafsir = await getCachedTafsir(surah, ayah);
 
     if (!tafsir) {
       tafsir = "⚠️ Для этого аята тафсира нет.";
     }
 
-    const words = tafsir.split(" ");
-    const maxLength = 512;
-    let current = "";
+    // Разбиваем тафсир на части для комфортного чтения
+    // 3500 символов ~ 500-600 слов - оптимально для одного сообщения
+    const MAX_CHARS_PER_PART = 1700;
+    const SENTENCE_ENDINGS = [".", "!", "?", ";", ":", "»", "..."];
 
-    for (const word of words) {
-      if ((current + " " + word).length > maxLength) {
-        userData.tafsirParts.push(current.trim() + "...");
-        current = word;
-      } else {
-        current += " " + word;
+    let parts = [];
+    let remainingText = tafsir;
+
+    while (remainingText.length > 0) {
+      // Если оставшийся текст меньше максимальной длины, добавляем его целиком
+      if (remainingText.length <= MAX_CHARS_PER_PART) {
+        parts.push(remainingText.trim());
+        break;
       }
+
+      // Ищем хорошее место для разрыва в пределах MAX_CHARS_PER_PART
+      let cutIndex = MAX_CHARS_PER_PART;
+      let foundBreak = false;
+
+      // Пытаемся найти конец предложения
+      for (let i = MAX_CHARS_PER_PART; i > MAX_CHARS_PER_PART - 500; i--) {
+        if (i >= remainingText.length) continue;
+
+        // Проверяем конец предложения
+        if (SENTENCE_ENDINGS.includes(remainingText[i])) {
+          // Проверяем, что после знака препинания идет пробел или конец строки
+          if (
+            i + 1 >= remainingText.length ||
+            /\s/.test(remainingText[i + 1])
+          ) {
+            cutIndex = i + 1;
+            foundBreak = true;
+            break;
+          }
+        }
+
+        // Проверяем конец абзаца
+        if (remainingText[i] === "\n" && i > MAX_CHARS_PER_PART - 100) {
+          cutIndex = i + 1;
+          foundBreak = true;
+          break;
+        }
+      }
+
+      // Если не нашли хороший разрыв по знакам препинания, ищем по пробелу
+      if (!foundBreak) {
+        for (let i = MAX_CHARS_PER_PART; i > MAX_CHARS_PER_PART - 100; i--) {
+          if (i >= remainingText.length) continue;
+          if (remainingText[i] === " ") {
+            cutIndex = i + 1;
+            foundBreak = true;
+            break;
+          }
+        }
+      }
+
+      // Если всё еще не нашли, делаем разрыв по максимальной длине
+      if (!foundBreak) {
+        cutIndex = MAX_CHARS_PER_PART;
+      }
+
+      // Добавляем часть
+      const part = remainingText.substring(0, cutIndex).trim();
+      if (part.length > 0) {
+        parts.push(part);
+      }
+
+      // Обрезаем обработанную часть
+      remainingText = remainingText.substring(cutIndex).trim();
     }
-    if (current.trim()) userData.tafsirParts.push(current.trim());
+
+    userData.tafsirParts = parts;
 
     if (!userData.tafsirParts || userData.tafsirParts.length === 0) {
       await ctx.answerCbQuery("❌ Ошибка при обработке тафсира.");
@@ -1102,39 +1264,90 @@ async function showTafsir(ctx, reply = false) {
     }
 
     const keyboard =
-      userData.tafsirParts.length > 1
+      userData.tafsirParts.length > 1 &&
+      userData.currentTafsirPage < userData.tafsirParts.length - 1
         ? {
             inline_keyboard: [
-              [{ text: "Показать ещё", callback_data: "tafsir_next" }],
+              [
+                {
+                  text: "📖 Продолжение тафсира",
+                  callback_data: `tafsir_next:false:${surah}:${ayah}:${userData.currentTafsirPage}`,
+                },
+              ],
             ],
           }
         : getNavigationKeyboard(surah, ayah, false);
 
-    const message = `
-📘 *Тафсир ас-Са'ди*
-━━━━━━━━━━━━━━━
-🕋 *Сура:* ${surah} ${surahInfo.name_ru}
-🔹 *Аят:* ${ayah}
+    // Формируем первое сообщение
+    const firstPartText = userData.tafsirParts[userData.currentTafsirPage];
+    const hasMore = userData.tafsirParts.length > 1;
 
-💬 *Толкование:*
-_${userData.tafsirParts[0]}_
+    const message = `
+📘 <b>Тафсир ас-Са'ди</b>
+━━━━━━━━━━━━━━━
+🕋 <b>Сура:</b> ${surah} ${surahInfo.name_ru}
+🔹 <b>Аят:</b> ${ayah}
+
+💬 <b>Толкование:</b>
+${firstPartText}${hasMore ? "..." : ""}
+
+${
+  hasMore
+    ? `📄 <i>Часть ${userData.currentTafsirPage + 1} из ${
+        userData.tafsirParts.length
+      }</i>`
+    : ""
+}
 `;
 
     if (reply) {
       await ctx.reply(message, {
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         reply_markup: keyboard,
       });
     } else {
       await ctx.editMessageText(message, {
-        parse_mode: "Markdown",
+        parse_mode: "HTML",
         reply_markup: keyboard,
       });
     }
+
+    // Логируем статистику по тафсиру
+    if (userData.tafsirParts.length > 1) {
+      logger.info(`Tafsir split into ${userData.tafsirParts.length} parts`, {
+        surah,
+        ayah,
+        parts: userData.tafsirParts.length,
+        avgLength: Math.round(tafsir.length / userData.tafsirParts.length),
+      });
+    }
   } catch (err) {
-    logger.error(err);
+    logger.error("Error in showTafsir:", err);
     await ctx.answerCbQuery("❌ Ошибка при загрузке.");
     await ctx.reply("Ошибка при загрузке тафсира. Попробуйте позже.");
+  }
+}
+
+async function surahListMessage(ctx) {
+  try {
+    const replyMessage = () => {
+      let surahList = "📖 <b>Список сур Корана:</b>\n\n";
+      surahs.forEach((surah) => {
+        surahList += `${surah.number}. ${surah.name_en} (${surah.ayahs}) /surah_${surah.number}\n`;
+      });
+      surahList +=
+        "\n<i>Нажми на команду суры, чтобы выбрать её или введи номер</i>";
+      return surahList;
+    };
+
+    const message = replyMessage();
+
+    ctx.reply(message, { parse_mode: "HTML" });
+
+    return;
+  } catch (error) {
+    logger.error("Error in surahListMessage:", error);
+    await ctx.reply("❌ Ошибка при загрузке списка сур.");
   }
 }
 
@@ -1154,11 +1367,11 @@ const memoryManager = {
       }
 
       const clearedSessions = sessionManager.cleanupOldSessions(
-        CONFIG.sessionTimeout
+        CONFIG.sessionTimeout,
       );
 
       logger.info(
-        `Memory cleanup completed. Cache: ${clearedCacheItems} items, Sessions: ${clearedSessions} sessions`
+        `Memory cleanup completed. Cache: ${clearedCacheItems} items, Sessions: ${clearedSessions} sessions`,
       );
     } catch (error) {
       logger.error("Memory cleanup error:", error);
@@ -1202,9 +1415,9 @@ const backupManager = {
 async function sendAlert(message, level = "ERROR") {
   try {
     if (!ALERT_CHAT_ID) return;
-    const alertMsg = `🚨 *${level}*\n${message}\n_${new Date().toISOString()}_`;
+    const alertMsg = `🚨 <b>${level}</b>\n${message}\n_<i>${new Date().toISOString()}</i>_`;
     await bot.telegram.sendMessage(ALERT_CHAT_ID, alertMsg, {
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
     });
   } catch (error) {
     console.error("Alert sending failed:", error);
@@ -1212,6 +1425,144 @@ async function sendAlert(message, level = "ERROR") {
 }
 
 // ================ MIDDLEWARE ДЛЯ ЛОГИРОВАНИЯ И ЛИМИТОВ ================
+function accessForAdminsOnly(ctx, next) {
+  try {
+    const userId = ctx.from?.id?.toString();
+    if (isAdmin(userId)) {
+      return next();
+    } else {
+      logger.warn(
+        `Unauthorized access attempt by user ${userId} (@${ctx.from?.username}, ${ctx.from?.first_name})`,
+      );
+      return;
+    }
+  } catch (error) {
+    logger.error("Error in accessForAdminsOnly middleware:", error);
+    return next();
+  }
+}
+
+// ================ ОБРАБОТЧИК СОЗДАНИЯ АУДИО С ПРОВЕРКОЙ ЛИМИТОВ ================
+async function createAudioWithLimits(ctx, userData, ayahs) {
+  try {
+    // Проверяем лимит на создание аудио (более строгий)
+    if (FEATURE_FLAGS.redisLimits) {
+      const audioLimitCheck = await redisLimiter.checkAndIncrement(
+        ctx.from.id,
+        "audio",
+      );
+
+      if (!audioLimitCheck.allowed) {
+        analytics.trackEvent(ctx.from.id, "audio_limit_exceeded", {
+          reason: audioLimitCheck.reason,
+          ayahsCount: ayahs.length,
+        });
+
+        return {
+          success: false,
+          error:
+            audioLimitCheck.message || MESSAGE_TEMPLATES.error("audioLimit"),
+        };
+      }
+    }
+
+    // Логируем создание аудио
+    logger.info(
+      `Creating audio for user ${ctx.from.id}: ${userData.track}:${userData.text}`,
+      {
+        userId: ctx.from.id,
+        surah: userData.track,
+        ayahs: ayahs,
+        ayahsCount: ayahs.length,
+      },
+    );
+
+    let success = false;
+
+    if (isAdmin(ctx.from.id) && ayahs.length > 1) {
+      const tempMsg = await ctx.reply("Обработка аудио...");
+
+      await showProgress(ctx, tempMsg.message_id, 10);
+
+      const settings = { ayahs, surah: parseInt(userData.track) };
+
+      const outputAudio = await retryWithBackoff(
+        () => mp3create(settings),
+        3,
+        1000,
+      );
+      const outputAudioPath = path.join(outputAudio.folder, outputAudio.file);
+
+      await showProgress(ctx, tempMsg.message_id, 80);
+
+      const surahInfo = surahs.find(
+        (s) => s.number === parseInt(userData.track),
+      );
+      const tags = {
+        title: `Surah ${userData.track} ${surahInfo?.name_en || ""} (${
+          userData.text
+        })`,
+        artist: userData.artist,
+        year: new Date().getFullYear(),
+      };
+
+      let i = 0;
+      while (i < 3) {
+        success = await metaTags(tags, outputAudioPath, ctx, userData);
+        if (success) break;
+        i++;
+        logger.warn(`Retry ${i} for metaTags for user ${ctx.from.id}`);
+      }
+
+      try {
+        await ctx.deleteMessage(tempMsg.message_id);
+      } catch (e) {
+        logger.error("Ошибка удаления сообщения:", e.message);
+      }
+    } else {
+      userData.audioPath = await getValue(
+        toGlobalAyah(userData.track, ayahs[0]),
+      );
+
+      await finalizeAudio(ctx, userData);
+      success = true;
+    }
+
+    return {
+      success,
+      error: success ? null : MESSAGE_TEMPLATES.error("processing"),
+    };
+  } catch (error) {
+    logger.error("Error in audio creation:", error);
+    return {
+      success: false,
+      error: MESSAGE_TEMPLATES.error("processing"),
+    };
+  }
+}
+
+bot.use((ctx, next) => {
+  try {
+    // Проверяем, есть ли текстовое сообщение
+    if (ctx.message && ctx.message.text) {
+      // Если сообщение длиннее 50 символов
+      if (ctx.message.text.length > 50) {
+        // Просто возвращаем, не обрабатываем дальше
+        logger.info(
+          `Сообщение пользователя ${ctx.from?.id} пропущено из-за длины > 50 символов.`,
+        );
+        return;
+      }
+    }
+
+    // Если сообщение не текстовое или короче 50 символов, продолжаем обработку
+    return next();
+  } catch (error) {
+    logger.error("Error in length check middleware:", error);
+    return next();
+  }
+});
+
 bot.use(async (ctx, next) => {
   try {
     const userId = ctx.from?.id;
@@ -1226,7 +1577,7 @@ bot.use(async (ctx, next) => {
       logger.info(
         `Пользователь ${userId} (@${username}, ${firstName}) вызвал команду: ${
           ctx.message?.text || "callback"
-        }`
+        }`,
       );
 
       await next();
@@ -1252,7 +1603,7 @@ bot.use(async (ctx, next) => {
             reason: limitCheck.reason,
             username,
             firstName,
-          }
+          },
         );
 
         analytics.trackEvent(userId, "rate_limit_exceeded", {
@@ -1260,8 +1611,12 @@ bot.use(async (ctx, next) => {
           command: ctx.message?.text,
         });
 
-        return ctx.reply(
-          limitCheck.message || MESSAGE_TEMPLATES.error("rateLimit")
+        if (ctx.message) {
+          return;
+        }
+
+        return ctx.answerCbQuery(
+          limitCheck.message || MESSAGE_TEMPLATES.error("rateLimit"),
         );
       }
     }
@@ -1272,7 +1627,7 @@ bot.use(async (ctx, next) => {
     logger.info(
       `Пользователь ${userId} (@${username}, ${firstName}) вызвал команду: ${
         ctx.message?.text || "callback"
-      }`
+      }`,
     );
 
     await next();
@@ -1289,104 +1644,6 @@ bot.use(async (ctx, next) => {
   }
 });
 
-// ================ ОБРАБОТЧИК СОЗДАНИЯ АУДИО С ПРОВЕРКОЙ ЛИМИТОВ ================
-async function createAudioWithLimits(ctx, userData, ayahs) {
-  try {
-    // Проверяем лимит на создание аудио (более строгий)
-    if (FEATURE_FLAGS.redisLimits) {
-      const audioLimitCheck = await redisLimiter.checkAndIncrement(
-        ctx.from.id,
-        "audio"
-      );
-
-      if (!audioLimitCheck.allowed) {
-        analytics.trackEvent(ctx.from.id, "audio_limit_exceeded", {
-          reason: audioLimitCheck.reason,
-          ayahsCount: ayahs.length,
-        });
-
-        return {
-          success: false,
-          error:
-            audioLimitCheck.message || MESSAGE_TEMPLATES.error("audioLimit"),
-        };
-      }
-    }
-
-    // Логируем создание аудио
-    logger.info(
-      `Creating audio for user ${ctx.from.id}: ${userData.track}:${userData.text}`,
-      {
-        userId: ctx.from.id,
-        surah: userData.track,
-        ayahs: ayahs,
-        ayahsCount: ayahs.length,
-      }
-    );
-
-    let success = false;
-
-    if (isAdmin(ctx.from.id) && ayahs.length > 1) {
-      const tempMsg = await ctx.reply("Обработка аудио...");
-
-      await showProgress(ctx, tempMsg.message_id, 10);
-
-      const settings = { ayahs, surah: parseInt(userData.track) };
-
-      const outputAudio = await retryWithBackoff(
-        () => mp3create(settings),
-        3,
-        1000
-      );
-      const outputAudioPath = path.join(outputAudio.folder, outputAudio.file);
-
-      await showProgress(ctx, tempMsg.message_id, 80);
-
-      const surahInfo = surahs.find(
-        (s) => s.number === parseInt(userData.track)
-      );
-      const tags = {
-        title: `Surah ${userData.track} ${surahInfo?.name_en || ""} (${
-          userData.text
-        })`,
-        artist: userData.artist,
-        year: new Date().getFullYear(),
-      };
-
-      let i = 0;
-      while (i < 3) {
-        success = await metaTags(tags, outputAudioPath, ctx, userData);
-        if (success) break;
-        i++;
-        logger.warn(`Retry ${i} for metaTags for user ${ctx.from.id}`);
-      }
-
-      try {
-        await ctx.deleteMessage(tempMsg.message_id);
-      } catch (e) {
-        logger.error("Ошибка удаления сообщения:", e.message);
-      }
-    } else {
-      userData.audioPath = await getValue(
-        toGlobalAyah(userData.track, ayahs[0])
-      );
-
-      await finalizeAudio(ctx, userData);
-      success = true;
-    }
-    return {
-      success,
-      error: success ? null : MESSAGE_TEMPLATES.error("processing"),
-    };
-  } catch (error) {
-    logger.error("Error in audio creation:", error);
-    return {
-      success: false,
-      error: MESSAGE_TEMPLATES.error("processing"),
-    };
-  }
-}
-
 // ================ КОМАНДЫ БОТА ================
 
 // Стартовая команда
@@ -1396,18 +1653,50 @@ bot.start(async (ctx) => {
     const name = ctx.from.first_name || "брат";
     const username = ctx.from.username || null;
 
-    // Создаем/обновляем пользователя сразу после команды /start
+    // Получаем параметры из deeplink (если есть)
+    const startPayload = ctx.message?.text?.split(" ")[1];
+    let surah = null;
+    let ayah = null;
+
+    // Обработка deeplink для быстрого перехода к аяту
+    if (startPayload) {
+      // Обрабатываем разные форматы параметров
+      const match1 = startPayload.match(/s(\d+)_a(\d+)/); // Формат s5_a20
+      const match2 = startPayload.match(/surah_(\d+)_ayah_(\d+)/); // Формат surah_5_ayah_20
+      const match3 = startPayload.match(/(\d+)_(\d+)/); // Формат 5_20
+
+      if (match1) {
+        surah = parseInt(match1[1]);
+        ayah = parseInt(match1[2]);
+      } else if (match2) {
+        surah = parseInt(match2[1]);
+        ayah = parseInt(match2[2]);
+      } else if (match3) {
+        surah = parseInt(match3[1]);
+        ayah = parseInt(match3[2]);
+      }
+
+      // Логируем использование deeplink
+      if (surah && ayah) {
+        logger.info(
+          `User ${userId} used deeplink: surah ${surah}, ayah ${ayah}`,
+        );
+        analytics.trackEvent(userId, "deeplink_used", { surah, ayah });
+      }
+    }
+
+    // Создаем/обновляем пользователя
     if (FEATURE_FLAGS.usersDatabase) {
       try {
         await usersDB.upsertUser(
           userId,
           ctx.from.first_name || "User",
-          username
+          username,
         );
         logger.info(
           `User created/updated in database: ${userId} (@${
             username || "no-username"
-          })`
+          })`,
         );
       } catch (error) {
         logger.error("Error saving user to database:", error);
@@ -1417,15 +1706,30 @@ bot.start(async (ctx) => {
     // Также создаем сессию в памяти
     const userData = sessionManager.getSession(userId);
 
-    await ctx.reply(MESSAGE_TEMPLATES.welcome(name), {
-      reply_markup: {
-        keyboard: [
-          ["📖 Выбрать суру"],
-          //, ["📚 Начать заучивать"]
-        ],
-        resize_keyboard: true,
-      },
-    });
+    // Если есть параметры deeflink - сразу показываем аят
+    if (surah && ayah) {
+      // Сохраняем контекст для возврата
+      userData.lastCommand = "start_deeplink";
+      userData.lastSurah = surah;
+      userData.lastAyah = ayah;
+
+      // Показываем аят
+      await showTranslation(ctx, surah, ayah, true, true);
+      return; // Не показываем приветственное сообщение
+    }
+
+    // Стандартное приветствие (только если не было deeplink)
+    if (isAdmin(userId)) {
+      await ctx.reply(MESSAGE_TEMPLATES.welcome(name), {
+        reply_markup: {
+          keyboard: [
+            ["📖 Выбрать суру"],
+            //, ["📚 Начать заучивать"]
+          ],
+          resize_keyboard: true,
+        },
+      });
+    }
 
     // Трекаем событие
     analytics.trackEvent(userId, "start_command");
@@ -1435,7 +1739,7 @@ bot.start(async (ctx) => {
 });
 
 // Команда помощи
-bot.command("help", (ctx) => {
+bot.command("help", accessForAdminsOnly, (ctx) => {
   try {
     const helpMsg = `
 <b>Возможности бота:</b>
@@ -1455,8 +1759,6 @@ ${
 <b>/colors</b> — Показать значение цветов.
 <b>/stats</b> — Статистика бота.
 <b>/popular</b> — Статистика популярных запросов.
-<b>/users_stats</b> — Статистика пользователей
-<b>/users_list</b> — Список пользователей
 <b>/limits</b> — Статистика лимитов пользователя
 <b>/reset_limits</b> — Сбросить лимиты пользователя
 <b>/unban</b> — Разблокировать пользователя
@@ -1470,6 +1772,8 @@ ${
 
 <b>Примечание:</b>
 Бот отправляет аят в исполнении Махмуда Аль-Хусари.
+
+<b>Ваш Telegram Id:</b> <code>${ctx.from.id}</code>
   `;
     ctx.reply(helpMsg, { parse_mode: "HTML" });
     analytics.trackEvent(ctx.from.id, "help_command");
@@ -1478,16 +1782,8 @@ ${
   }
 });
 
-{
-  /* <b>/cleanup_users</b> — Очистить неактивных пользователей
-<b>/reload_config</b> — Перезагрузить конфигурацию.
-<b>/feature_flags</b> — Управление фича-флагами
-<b>/health</b> — Проверка здоровья системы
-<b>/backup</b> — Создать полный бэкап */
-}
-
 // Информация о суре
-bot.command("surah_info", (ctx) => {
+bot.command("surah_info", accessForAdminsOnly, (ctx) => {
   try {
     const surahNum = parseInt(ctx.message.text.split(" ")[1]);
 
@@ -1497,16 +1793,16 @@ bot.command("surah_info", (ctx) => {
 
     const surah = surahs[surahNum - 1];
     const infoMsg = `
-📖 *${surah.name_ru} (${surah.name_ar})*
+📖 <b>${surah.name_ru}</b> (<i>${surah.name_ar}</i>)</b>
 
-🔸 *Аятов:* ${surah.ayahs}
-🔸 *Тип:* ${surah.type === "meccan" ? "Мекканская" : "Мединская"}
-🔸 *Ниспослание:* ${surah.revelation_order}
+🔸 <b>Аятов:</b> ${surah.ayahs}
+🔸 <b>Тип:</b> ${surah.type === "meccan" ? "Мекканская" : "Мединская"}
+🔸 <b>Ниспослание:</b> ${surah.revelation_order}
 
-_${surah.name_en}_
+_<i>${surah.name_en}</i>_
   `;
 
-    ctx.reply(infoMsg, { parse_mode: "Markdown" });
+    ctx.reply(infoMsg, { parse_mode: "HTML" });
     analytics.trackEvent(ctx.from.id, "surah_info", { surah: surahNum });
   } catch (error) {
     logger.error("Error in surah_info command:", error);
@@ -1515,23 +1811,36 @@ _${surah.name_en}_
 });
 
 // Выбор суры
-bot.command("surah", (ctx) => {
+bot.hears(/^\/surah(?:_(\d+))?\s*(\d+)?$/, accessForAdminsOnly, async (ctx) => {
   try {
     const userData = getUserData(ctx.from.id);
-    const newTrack = ctx.message.text.replace("/surah", "").trim();
+    const match = ctx.match;
 
-    if (!newTrack || isNaN(newTrack)) {
-      return ctx.reply("Укажите номер суры, например: /surah 5");
+    userData.button = null; // Сбрасываем кнопку выбора
+
+    // match[1] - для /surah_1 (с подчеркиванием)
+    // match[2] - для /surah 1 (с пробелом)
+    let surahNum = null;
+
+    if (match[1]) {
+      surahNum = parseInt(match[1]); // Формат /surah_1
+    } else if (match[2]) {
+      surahNum = parseInt(match[2]); // Формат /surah 1
     }
 
-    const surahNum = Number(newTrack);
+    // Если номер не найден, показываем список
+    if (!surahNum) {
+      await surahListMessage(ctx);
+      return;
+    }
 
+    // Проверяем диапазон
     if (surahNum < 1 || surahNum > 114) {
       return ctx.reply("Номер суры должен быть от 1 до 114");
     }
 
     userData.track = surahNum;
-    ctx.reply(`Выбрана сура ${surahNum}. Теперь отправьте номер аята.`);
+    await ctx.reply(`Выбрана сура ${surahNum}. Теперь отправьте номер аята.`);
     analytics.trackEvent(ctx.from.id, "surah_selected", { surah: surahNum });
   } catch (error) {
     logger.error("Error in surah command:", error);
@@ -1540,7 +1849,7 @@ bot.command("surah", (ctx) => {
 });
 
 // Информация о цветах
-bot.command("colors", (ctx) => {
+bot.command("colors", accessForAdminsOnly, (ctx) => {
   try {
     const colorsMsg = `
 Что означают цвета при выборе? 
@@ -1561,7 +1870,7 @@ bot.command("colors", (ctx) => {
 });
 
 // Статистика бота с данными из users-db и redis-limits
-bot.command("stats", async (ctx) => {
+bot.command("stats", accessForAdminsOnly, async (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) return;
 
@@ -1587,7 +1896,7 @@ bot.command("stats", async (ctx) => {
     }
 
     const statsMsg = `
-📊 *Статистика бота*
+📊 <b>Статистика бота</b>
 ━━━━━━━━━━━━━━━
 👥 Всего пользователей: ${userStats.total_users || botStats.users.size}
 👤 С username: ${userStats.with_username || "N/A"}
@@ -1604,12 +1913,12 @@ bot.command("stats", async (ctx) => {
 📈 Конверсия: ${analytics.getConversionRate()}%
 🕐 Аптайм: ${Math.floor(process.uptime() / 60)} минут
 ━━━━━━━━━━━━━━━
-🔴 *Redis Status:* ${redisHealth ? "✅ OK" : "❌ OFFLINE"}
-📊 *Redis Keys:* ${globalStats.totalKeys || "N/A"}
-🚫 *Заблокировано:* ${globalStats.bannedUsers || "N/A"}
+🔴 <b>Redis Status:</b> ${redisHealth ? "✅ OK" : "❌ OFFLINE"}
+📊 <b>Redis Keys:</b> ${globalStats.totalKeys || "N/A"}
+🚫 <b>Заблокировано:</b> ${globalStats.bannedUsers || "N/A"}
     `;
 
-    ctx.reply(statsMsg, { parse_mode: "Markdown" });
+    ctx.reply(statsMsg, { parse_mode: "HTML" });
   } catch (error) {
     logger.error("Error in stats command:", error);
     ctx.reply("Ошибка при получении статистики.");
@@ -1617,14 +1926,14 @@ bot.command("stats", async (ctx) => {
 });
 
 // Популярные запросы
-bot.command("popular", (ctx) => {
+bot.command("popular", accessForAdminsOnly, (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) return;
 
     const stats = popularRequests.getStats();
-    let message = "📈 *Популярные запросы:*\n\n";
+    let message = "📈 <b>Популярные запросы:</b>\n\n";
 
-    message += "*Топ сур:*\n";
+    message += "<b>Топ сур:</b>\n";
     stats.topSurahs.forEach(([surahId, count], index) => {
       const surah = surahs[surahId - 1];
       message += `${index + 1}. ${surahId} - ${
@@ -1632,11 +1941,11 @@ bot.command("popular", (ctx) => {
       }: ${count} запросов\n`;
     });
 
-    message += `\n*Типы запросов:*\n`;
+    message += `\n<b>Типы запросов:</b>\n`;
     message += `Одиночные аяты: ${stats.rangeStats.single || 0}\n`;
     message += `Несколько аятов: ${stats.rangeStats.multiple || 0}`;
 
-    ctx.reply(message, { parse_mode: "Markdown" });
+    ctx.reply(message, { parse_mode: "HTML" });
   } catch (error) {
     logger.error("Error in popular command:", error);
     ctx.reply("Ошибка при получении статистики популярных запросов.");
@@ -1644,20 +1953,20 @@ bot.command("popular", (ctx) => {
 });
 
 // Статистика пользователей
-bot.command("users_stats", async (ctx) => {
+bot.command("users_stats", accessForAdminsOnly, async (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) return;
 
     if (!FEATURE_FLAGS.usersDatabase) {
       return ctx.reply(
-        "База данных пользователей отключена. Включите FF_USERS_DB."
+        "База данных пользователей отключена. Включите FF_USERS_DB.",
       );
     }
 
     const stats = await usersDB.getStatistics();
     const topUsers = await usersDB.getTopUsers(5);
 
-    let message = "📊 *Статистика пользователей*\n━━━━━━━━━━━━━━━\n";
+    let message = "📊 <b>Статистика пользователей</b>\n━━━━━━━━━━━━━━━\n";
     message += `👥 Всего пользователей: ${stats.total_users}\n`;
     message += `👤 С username: ${stats.with_username}\n`;
     message += `🔥 Активных сегодня: ${stats.active_last_day}\n`;
@@ -1665,14 +1974,14 @@ bot.command("users_stats", async (ctx) => {
     message += `📨 Среднее запросов: ${Math.round(stats.avg_requests)}\n`;
     message += `🏆 Макс запросов: ${stats.max_requests}\n\n`;
 
-    message += "🏆 *Топ пользователей:*\n";
+    message += "🏆 <b>Топ пользователей:</b>\n";
     topUsers.forEach((user, index) => {
       message += `${index + 1}. ${user.first_name} (@${
         user.username || "нет"
       }): ${user.requests_count} запросов\n`;
     });
 
-    ctx.reply(message, { parse_mode: "Markdown" });
+    ctx.reply(message, { parse_mode: "HTML" });
   } catch (error) {
     logger.error("Error in users_stats command:", error);
     ctx.reply("Ошибка при получении статистики пользователей.");
@@ -1680,19 +1989,19 @@ bot.command("users_stats", async (ctx) => {
 });
 
 // Список пользователей
-bot.command("users_list", async (ctx) => {
+bot.command("users_list", accessForAdminsOnly, async (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) return;
 
     if (!FEATURE_FLAGS.usersDatabase) {
       return ctx.reply(
-        "База данных пользователей отключена. Включите FF_USERS_DB."
+        "База данных пользователей отключена. Включите FF_USERS_DB.",
       );
     }
 
     const users = await usersDB.getAllUsers(10);
 
-    let message = "👥 *Последние пользователи*\n━━━━━━━━━━━━━━━\n";
+    let message = "👥 <b>Последние пользователи</b>\n━━━━━━━━━━━━━━━\n";
 
     if (users.length === 0) {
       message += "Пользователей нет";
@@ -1708,7 +2017,7 @@ bot.command("users_list", async (ctx) => {
       });
     }
 
-    ctx.reply(message, { parse_mode: "Markdown" });
+    ctx.reply(message, { parse_mode: "HTML" });
   } catch (error) {
     logger.error("Error in users_list command:", error);
     ctx.reply("Ошибка при получении списка пользователей.");
@@ -1716,7 +2025,7 @@ bot.command("users_list", async (ctx) => {
 });
 
 // Статистика лимитов пользователя
-bot.command("limits", async (ctx) => {
+bot.command("limits", accessForAdminsOnly, async (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) return;
 
@@ -1736,7 +2045,7 @@ bot.command("limits", async (ctx) => {
       return ctx.reply("Не удалось получить статистику лимитов");
     }
 
-    let message = "📊 *Статистика лимитов*\n━━━━━━━━━━━━━━━\n";
+    let message = "📊 <b>Статистика лимитов</b>\n━━━━━━━━━━━━━━━\n";
 
     if (userInfo) {
       message += `👤 Пользователь: ${userInfo.first_name} (@${
@@ -1745,23 +2054,23 @@ bot.command("limits", async (ctx) => {
       message += `🆔 ID: ${userId}\n\n`;
     }
 
-    message += `🕐 *Запросы за минуту:* ${stats.minute}/${redisLimiter.config.limits.perMinute}\n`;
-    message += `⏰ *Запросы за час:* ${stats.hour}/${redisLimiter.config.limits.perHour}\n`;
-    message += `📅 *Запросы за день:* ${stats.day}/${redisLimiter.config.limits.perDay}\n\n`;
+    message += `🕐 <b>Запросы за минуту:</b> ${stats.minute}/${redisLimiter.config.limits.perMinute}\n`;
+    message += `⏰ <b>Запросы за час:</b> ${stats.hour}/${redisLimiter.config.limits.perHour}\n`;
+    message += `📅 <b>Запросы за день:</b> ${stats.day}/${redisLimiter.config.limits.perDay}\n\n`;
 
     if (stats.banned) {
       const expires = new Date(stats.banned.expires).toLocaleString("ru-RU");
-      message += `🚫 *ЗАБЛОКИРОВАН*\n`;
-      message += `📝 Причина: ${stats.banned.reason}\n`;
-      message += `🕐 Истекает: ${expires}\n\n`;
+      message += `🚫 <b>ЗАБЛОКИРОВАН</b>\n`;
+      message += `📝 <b>Причина:</b> ${stats.banned.reason}\n`;
+      message += `🕐 <b>Истекает:</b> ${expires}\n\n`;
     }
 
-    message += `🔄 Сброс через:\n`;
+    message += `🔄 <b>Сброс через:</b>\n`;
     message += `- Минута: ${stats.ttl.minute} сек\n`;
     message += `- Час: ${stats.ttl.hour} сек\n`;
     message += `- День: ${stats.ttl.day} сек`;
 
-    ctx.reply(message, { parse_mode: "Markdown" });
+    ctx.reply(message, { parse_mode: "HTML" });
   } catch (error) {
     logger.error("Error in limits command:", error);
     ctx.reply("Ошибка при получении статистики лимитов.");
@@ -1769,7 +2078,7 @@ bot.command("limits", async (ctx) => {
 });
 
 // Сброс лимитов пользователя
-bot.command("reset_limits", async (ctx) => {
+bot.command("reset_limits", accessForAdminsOnly, async (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) return;
 
@@ -1798,7 +2107,7 @@ bot.command("reset_limits", async (ctx) => {
 });
 
 // Разблокировать пользователя
-bot.command("unban", async (ctx) => {
+bot.command("unban", accessForAdminsOnly, async (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) return;
 
@@ -1822,7 +2131,7 @@ bot.command("unban", async (ctx) => {
 });
 
 // Очистка неактивных пользователей
-bot.command("cleanup_users", async (ctx) => {
+bot.command("cleanup_users", accessForAdminsOnly, async (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) return;
 
@@ -1839,11 +2148,11 @@ bot.command("cleanup_users", async (ctx) => {
     }
 
     const cleanedFromSessions = sessionManager.cleanupOldSessions(
-      days * 24 * 60 * 60 * 1000
+      days * 24 * 60 * 60 * 1000,
     );
 
     ctx.reply(
-      `✅ Удалено ${cleanedFromDB} неактивных пользователей из БД и ${cleanedFromSessions} сессий (старше ${days} дней)`
+      `✅ Удалено ${cleanedFromDB} неактивных пользователей из БД и ${cleanedFromSessions} сессий (старше ${days} дней)`,
     );
   } catch (error) {
     logger.error("Error in cleanup_users command:", error);
@@ -1852,7 +2161,7 @@ bot.command("cleanup_users", async (ctx) => {
 });
 
 // Очистка всех данных
-bot.command("clear_all", (ctx) => {
+bot.command("clear_all", accessForAdminsOnly, (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) {
       return ctx.reply("❌ Эта команда доступна только администратору.");
@@ -1875,7 +2184,7 @@ bot.command("clear_all", (ctx) => {
 });
 
 // Список аудиофайлов
-bot.command("list_audio", (ctx) => {
+bot.command("list_audio", accessForAdminsOnly, (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) {
       return ctx.reply("❌ Эта команда доступна только администратору.");
@@ -1894,7 +2203,7 @@ bot.command("list_audio", (ctx) => {
       msg += `<b>Аяты:</b> ${item.ayahs.join(", ")}\n`;
       msg += `<b>Цвет:</b> ${item.color}\n`;
       msg += `<b>Дата:</b> ${new Date(item.timestamp).toLocaleString(
-        "ru-RU"
+        "ru-RU",
       )}\n`;
       msg += "──────────────\n";
     });
@@ -1906,7 +2215,7 @@ bot.command("list_audio", (ctx) => {
 });
 
 // Удаление аудиофайла
-bot.command("delete_audio", (ctx) => {
+bot.command("delete_audio", accessForAdminsOnly, (ctx) => {
   try {
     if (!isAdmin(ctx.from.id)) {
       return ctx.reply("❌ Эта команда доступна только администратору.");
@@ -1936,7 +2245,7 @@ bot.command("delete_audio", (ctx) => {
 });
 
 // ================ ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ ================
-bot.on("text", async (ctx) => {
+bot.on("text", accessForAdminsOnly, async (ctx) => {
   if (ctx.message.text.startsWith("/")) {
     return;
   }
@@ -1947,7 +2256,7 @@ bot.on("text", async (ctx) => {
       await ensureUserExists(
         ctx.from.id,
         ctx.from.first_name,
-        ctx.from.username
+        ctx.from.username,
       );
     }
 
@@ -1961,38 +2270,9 @@ bot.on("text", async (ctx) => {
 
         if (newText === "📖 Выбрать суру") {
           userData.button = true;
-          return ctx.reply("Введите номер суры (от 1 до 114)");
-        }
 
-        if (newText === "📚 Начать заучивать") {
-          // правила заучивания
-          const rulesMsg = `
-<b>🤝 Ассаляму ‘алейкум!</b>
-
-Мы рады приветствовать вас на пути заучивания Священного Корана — одному из величайших видов поклонения.
-
-📖 Пророк ﷺ сказал:  
-<i>«Кто ступит на путь поиска знания, тому Аллах облегчает путь в Рай»</i>  
-<i>«Лучшие из вас — те, кто изучают Коран и обучают ему»</i>
-
-Так как сегодня большинство людей пользуются мессенджерами, мы сделали процесс заучивания максимально простым и доступным.
-
-✨ Совместно с <b>@lubi_quran</b> мы подготовили программу, основанную на принципе:  
-<b>— один аят → один шаг</b>
-
-<b>📘 В рамках программы:</b>
-• 🎧 вы слушаете чтение аята в исполнении шейха <b>Махмуда Халиля аль-Хусари</b>;  
-• 📕 читаете перевод для понимания смысла;  
-• 📘 изучаете краткий тафсир шейха <b>Ас-Са‘ди</b>;  
-• 🔁 после освоения аята переходите к следующему.
-
-<b>📌 Правильное чтение — основа успешного заучивания.</b>  
-Поэтому рекомендуем пройти курс таджвида у <b>@lubi_quran</b>.
-
-<b>🤲 Пусть Аллах сделает ваше заучивание лёгким и благодатным и откроет вам понимание Его Книги.</b>
-
-          `;
-          return ctx.reply(rulesMsg, { parse_mode: "HTML" });
+          await surahListMessage(ctx);
+          return;
         }
 
         if (userData.button) {
@@ -2001,7 +2281,7 @@ bot.on("text", async (ctx) => {
             userData.track = surahNumber;
             userData.button = null;
             return ctx.reply(
-              `Выбрана сура ${surahNumber}. Отправьте номер аята.`
+              `Выбрана сура ${surahNumber}. Отправьте номер аята.`,
             );
           } else {
             return ctx.reply("Номер суры должен быть от 1 до 114");
@@ -2012,13 +2292,13 @@ bot.on("text", async (ctx) => {
 
         if (!userData.track || !userData.text) {
           return ctx.reply(
-            "Укажите номер суры (/surah) и номер аята (отправьте текст)."
+            "Укажите номер суры (/surah) и номер аята (отправьте текст).",
           );
         }
 
         // Получаем информацию о суре
         const surahInfo = surahs.find(
-          (s) => s.number === parseInt(userData.track)
+          (s) => s.number === parseInt(userData.track),
         );
         if (!surahInfo) {
           return ctx.reply(`Сура ${userData.track} не найдена`);
@@ -2035,20 +2315,20 @@ bot.on("text", async (ctx) => {
 
         // Проверяем, что все аяты в пределах суры
         const invalidAyahs = ayahs.filter(
-          (ayah) => ayah <= 0 || ayah > surahInfo.ayahs
+          (ayah) => ayah <= 0 || ayah > surahInfo.ayahs,
         );
         if (invalidAyahs.length > 0) {
           const surahName = surahInfo.name_ru || surahInfo.name_en;
           return ctx.reply(
             `Сура ${surahInfo.number} (${surahName}) содержит ${surahInfo.ayahs} аятов.\n` +
-              `Некорректные номер(а) аята(ов): ${invalidAyahs.join(", ")}`
+              `Некорректные номер(а) аята(ов): ${invalidAyahs.join(", ")}`,
           );
         }
 
         // Проверяем лимит на количество аятов
         if (ayahs.length > CONFIG.userLimits.maxAyahsPerRequest) {
           return ctx.reply(
-            `Максимальное количество аятов за один запрос: ${CONFIG.userLimits.maxAyahsPerRequest}`
+            `Максимальное количество аятов за один запрос: ${CONFIG.userLimits.maxAyahsPerRequest}`,
           );
         }
 
@@ -2080,54 +2360,186 @@ bot.on("text", async (ctx) => {
 
 // ================ ОБРАБОТЧИКИ КОЛБЭКОВ ================
 
-// Обработка выбора цвета
-bot.action(/color_(.+)/, async (ctx) => {
-  try {
-    await ctx.deleteMessage();
-    const userData = getUserData(ctx.from.id);
-    const colorAction = ctx.match[1];
-    userData.color = colorAction;
+// ================ УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ЦВЕТА ================
+bot.action(
+  /^show_share_link:(\d+):(\d+)$/,
+  accessForAdminsOnly,
+  async (ctx) => {
+    try {
+      await ctx.answerCbQuery("Создаю ссылку...");
+      await ctx.editMessageReplyMarkup();
 
-    if (
-      !userData.audioPath ||
-      !userData.track ||
-      !userData.text ||
-      !userData.artist
-    ) {
-      return ctx.reply(
-        "Недостаточно данных для отправки аудио. Начните заново."
-      );
+      const surah = parseInt(ctx.match[1]);
+      const ayah = parseInt(ctx.match[2]);
+
+      // Формируем ссылку
+
+      await ctx.answerCbQuery(); // Скрыть уведомление "часики"
+
+      // Отправляем сообщение с ссылкой
+      await ctx.reply(shareLink(ctx, surah, ayah), {
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "⬅️ Назад",
+                callback_data: `prev_translation_ayah:${surah}:${ayah}`,
+              },
+            ],
+          ],
+        },
+      });
+    } catch (error) {
+      logger.error("Error in show_share_link:", error);
+      await ctx.answerCbQuery("Ошибка при создании ссылки", {
+        show_alert: true,
+      });
+    }
+  },
+);
+
+bot.action("send_ayah", accessForAdminsOnly, async (ctx) => {
+  try {
+    await ctx.editMessageReplyMarkup();
+    const userData = getUserData(ctx.from.id);
+
+    if (!userData.audioPath) return ctx.reply("Аудиофайл не найден.");
+
+    const link = shareLink(ctx, userData.track, userData.text, true);
+
+    const sentAudio = await bot.telegram.sendAudio(
+      GROUP_ID || ctx.chat.id,
+      userData.audioPath,
+      {
+        caption: `${userData.message}\n\n🔴 Не забудь посмотреть перевод 📕 и тафсир 📘 😊`,
+        parse_mode: "HTML",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: `📕 Перевод/ 📘 Тафсир`,
+                url: link,
+              },
+            ],
+          ],
+        },
+      },
+    );
+
+    Object.assign(userData, {
+      text: "",
+      color: "",
+      audioPath: "",
+      message: "",
+    });
+
+    analytics.trackEvent(ctx.from.id, "audio_sent_to_group", {
+      surah: userData.track,
+      ayahs: userData.text,
+      color: userData.color,
+    });
+  } catch (err) {
+    logger.error(`Send audio error: ${err.message}`);
+    ctx.reply("Ошибка при отправке аудио.");
+  }
+});
+
+bot.action(/^color_([🟢🔵🟡🔴🟣🟠🟥🔈]+)(?::(\d+):(\d+))?$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery("Загружаю аят...");
+    await ctx.editMessageReplyMarkup();
+    const colorEmoji = ctx.match[1]; // Только эмодзи кружка
+
+    // Определяем режим: с сурой/аятом или без
+    const hasAyahInfo = ctx.match[2] && ctx.match[3];
+    let surah, ayah;
+
+    if (hasAyahInfo) {
+      // Режим с сурой и аятом в callback_data
+      surah = parseInt(ctx.match[2]);
+      ayah = parseInt(ctx.match[3]);
+    } else {
+      // Режим с данными из сессии
+      const userData = getUserData(ctx.from.id);
+      surah = parseInt(userData.track);
+      ayah = parseInt(userData.text);
     }
 
-    userData.audioPath = await getValue(
-      toGlobalAyah(userData.track, parseInt(userData.text))
-    );
-    userData.text = userData.text.toString();
+    if (!surah || !ayah || isNaN(surah) || isNaN(ayah)) {
+      return ctx.reply("Не удалось определить суру и аят. Начните заново.");
+    }
 
-    const surahInfo = surahs[Number(userData.track) - 1] || {};
-    userData.message = `${colorAction} Сура ${userData.track} «${
+    // Получаем или создаем userData
+    const userData = getUserData(ctx.from.id);
+    userData.color = colorEmoji;
+
+    let audioFileId;
+    if (userData.audioPath !== "temp/result.mp3") {
+      audioFileId = await getValue(toGlobalAyah(surah, ayah));
+      userData.audioPath = audioFileId;
+    } else {
+      audioFileId = userData.audioPath;
+    }
+
+    const surahInfo = surahs[surah - 1] || {};
+    userData.message = `${colorEmoji} Сура ${userData.track} «${
       surahInfo.name_en
-    } (${surahInfo.name_ru}), ${userData.text.includes("-") ? "аяты" : "аят"} ${
+    } (${surahInfo.name_ru}), аят ${
       userData.text
     }» - Махмуд Аль-Хусари\n\n#коран ${toHashtag(surahInfo.name_en)}`;
 
-    const isOneAyah = userData.text && /^\d+$/.test(userData.text.trim());
+    const isOneAyah = true; // Для одиночного аята всегда true в этом контексте
+
+    const hasTafsirInfo = await hasTafsir(surah, ayah);
 
     // Кнопки для админа
     const adminKeyboard = [
-      [
-        Markup.button.callback("✅ Отправить", "send_audio"),
-        Markup.button.callback("❌ Отмена", "cancel_audio"),
-      ],
+      // Кнопки для аудио (появляются только когда colorEmoji === '🔈')
+      ...(colorEmoji !== "🔈"
+        ? [
+            [
+              Markup.button.callback("✅ Отправить", "send_audio"),
+              Markup.button.callback("❌ Отмена", "cancel_audio"),
+            ],
+          ]
+        : []),
+
+      // Кнопки для одного аята (появляются только когда isOneAyah === true)
       ...(isOneAyah
         ? [
             [
+              {
+                text: "⬅️ Пред.аят",
+                callback_data: `prev_translation_ayah:${surah}:${ayah - 1}`,
+              },
+              {
+                text: "След.аят ➡️",
+                callback_data: `next_translation_ayah:${surah}:${ayah + 1}`,
+              },
+            ],
+            [
               Markup.button.callback(
                 "📕 Показать перевод",
-                "show_translate:true"
+                `show_translate:true:${surah}:${ayah}`,
               ),
             ],
-            [Markup.button.callback("📘 Показать тафсир", "show_tafsir:true")],
+            ...(hasTafsirInfo
+              ? [
+                  [
+                    Markup.button.callback(
+                      "📘 Показать тафсир",
+                      `show_tafsir:true:${surah}:${ayah}`,
+                    ),
+                  ],
+                ]
+              : []),
+            [
+              Markup.button.callback(
+                "Отправить аят в группу на заучивание",
+                `send_ayah`,
+              ),
+            ],
           ]
         : []),
     ];
@@ -2137,40 +2549,73 @@ bot.action(/color_(.+)/, async (ctx) => {
       ...(isOneAyah
         ? [
             [
+              {
+                text: "⬅️ Пред.аят",
+                callback_data: `prev_translation_ayah:${surah}:${ayah - 1}`,
+              },
+              {
+                text: "След.аят ➡️",
+                callback_data: `next_translation_ayah:${surah}:${ayah + 1}`,
+              },
+            ],
+            [
               Markup.button.callback(
                 "📕 Показать перевод",
-                "show_translate:true"
+                `show_translate:true:${surah}:${ayah}`,
               ),
             ],
-            [Markup.button.callback("📘 Показать тафсир", "show_tafsir:true")],
+            ...(hasTafsirInfo
+              ? [
+                  [
+                    Markup.button.callback(
+                      "📘 Показать тафсир",
+                      `show_tafsir:true:${surah}:${ayah}`,
+                    ),
+                  ],
+                ]
+              : []),
           ]
         : []),
     ];
 
-    let audioFileId = await ctx.replyWithAudio(
-      getAudioInput(userData.audioPath),
-      {
-        filename: `${userData.artist} - ${surahInfo.name_en} - ${userData.text}.mp3`,
-        caption: userData.message,
-        reply_markup: isAdmin(ctx.from.id)
-          ? Markup.inlineKeyboard(adminKeyboard).reply_markup
-          : Markup.inlineKeyboard(userKeyboard).reply_markup,
-      }
-    );
+    let audioMessage;
+    try {
+      audioMessage = await ctx.replyWithAudio(
+        getAudioInput(userData.audioPath),
+        {
+          filename: `M. Al-Hosary - ${surahInfo.name_en} - ${ayah}.mp3`,
+          caption: userData.message,
+          reply_markup: isAdmin(ctx.from.id)
+            ? Markup.inlineKeyboard(adminKeyboard).reply_markup
+            : Markup.inlineKeyboard(userKeyboard).reply_markup,
+        },
+      );
+    } catch (audioError) {
+      logger.error("Error sending audio:", audioError);
+      return ctx.reply("Ошибка при отправке аудио. Попробуйте еще раз.");
+    }
 
-    userData.audioPath = audioFileId.audio.file_id;
+    userData.audioPath = audioMessage.audio.file_id;
 
-    analytics.trackEvent(ctx.from.id, "color_selected", { color: colorAction });
+    analytics.trackEvent(ctx.from.id, "color_selected", {
+      color: colorEmoji,
+      mode: hasAyahInfo ? "callback_data" : "session",
+      surah,
+      ayah,
+    });
   } catch (err) {
-    logger.error(`Color action error: ${err.message}`);
+    logger.error(`Color action error: ${err.message}`, {
+      match: ctx.match,
+      userId: ctx.from.id,
+    });
     ctx.reply("Ошибка при выборе цвета.");
   }
 });
 
 // Отправка аудио в канал
-bot.action("send_audio", async (ctx) => {
+bot.action("send_audio", accessForAdminsOnly, async (ctx) => {
   try {
-    await ctx.deleteMessage();
+    await ctx.editMessageReplyMarkup();
     const userData = getUserData(ctx.from.id);
 
     if (!userData.audioPath) return ctx.reply("Аудиофайл не найден.");
@@ -2178,7 +2623,7 @@ bot.action("send_audio", async (ctx) => {
     const sentAudio = await bot.telegram.sendAudio(
       CHANNEL_ID || ctx.chat.id,
       userData.audioPath,
-      { caption: userData.message }
+      { caption: userData.message },
     );
 
     const file_id = sentAudio.audio.file_id;
@@ -2225,10 +2670,11 @@ bot.action("send_audio", async (ctx) => {
 });
 
 // Отмена отправки
-bot.action("cancel_audio", async (ctx) => {
+bot.action("cancel_audio", accessForAdminsOnly, async (ctx) => {
   try {
+    await ctx.editMessageReplyMarkup();
+
     const userData = getUserData(ctx.from.id);
-    await ctx.deleteMessage();
     ctx.reply("Отправка отменена.");
     clearTempFolder();
     Object.assign(userData, {
@@ -2244,13 +2690,16 @@ bot.action("cancel_audio", async (ctx) => {
 });
 
 // Показать перевод
-bot.action(/show_translate:(true|false)/, async (ctx) => {
+bot.action(/show_translate:(true|false):(\d+):(\d+)/, async (ctx) => {
   try {
     const flag = ctx.match[1] === "true";
-    const userData = getUserData(ctx.from.id);
+    const surah = parseInt(ctx.match[2]);
+    const ayah = parseInt(ctx.match[3]);
 
-    const surah = Number(userData.track);
-    const ayah = Number(userData.text);
+    // Обновляем сессию для консистентности
+    const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = ayah.toString();
 
     await showTranslation(ctx, surah, ayah, flag);
 
@@ -2271,38 +2720,62 @@ bot.action(/show_translation_continue:(\d+):(\d+)/, async (ctx) => {
     const ayah = parseInt(ctx.match[2]);
     const userData = getUserData(ctx.from.id);
 
+    const translate = userData.translate || "abu_adel";
+
     await ctx.answerCbQuery("Загружаю продолжение...");
     await ctx.editMessageReplyMarkup(); // Убираем кнопку
 
     // Получаем полный перевод
-    let translationResult = await getCachedTranslation(surah, ayah);
+    let translationResult = await getCachedTranslation(surah, ayah, translate);
     const surahInfo = surahs[surah - 1] || {};
 
     // Формируем полное сообщение
     const fullMessage = `
-📕 *Перевод Абу Аделя (полный текст)*
+📕 <b>Перевод ${
+      translate === "abu_adel" ? "Абу Аделя" : "Кулиева"
+    } (полный текст)</b>
 ━━━━━━━━━━━━━━━
-🕋 *Сура:* ${surah} ${surahInfo.name_ru}
-🔹 *Аят:* ${ayah}
+🕋 <b>Сура:</b> ${surah} ${surahInfo.name_ru}
+🔹 <b>Аят:</b> ${ayah} / ${surahInfo.ayahs}
 
-💬 *Полный перевод:*
-_${translationResult}_
+💬 <b>Полный перевод:</b>
+<i>${translationResult}</i>
     `;
 
     // Отправляем полный перевод как новое сообщение
     await ctx.reply(fullMessage, {
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
       reply_markup: {
         inline_keyboard: [
           [
-            { text: "⬅️ Пред.аят", callback_data: `prev_translation_ayah` },
-            { text: "След.аят ➡️", callback_data: `next_translation_ayah` },
+            {
+              text: "⬅️ Пред.аят",
+              callback_data: `prev_translation_ayah:${surah}:${ayah - 1}`,
+            },
+            {
+              text: "След.аят ➡️",
+              callback_data: `next_translation_ayah:${surah}:${ayah + 1}`,
+            },
+          ],
+          [
+            {
+              text: `🔄 Перевод ${
+                translate === "abu_adel" ? "Кулиева" : "Абу Аделя"
+              }`,
+              callback_data: `change_translate:${surah}:${ayah}`,
+            },
           ],
           [{ text: "🔈 Прослушать аят", callback_data: `color_🔈` }],
           [
             {
               text: "📘 Перейти к тафсиру",
-              callback_data: `show_tafsir_reply`,
+              callback_data: `show_tafsir:true:${surah}:${ayah}`,
+            },
+          ],
+          [
+            {
+              text: "📤 Поделиться аятом",
+              callback_data: `show_share_link:${surah}:${ayah}`,
             },
           ],
         ],
@@ -2319,66 +2792,22 @@ _${translationResult}_
   }
 });
 
-// Обработчик перехода к следующему аяту из перевода
-bot.action("next_translation_ayah", async (ctx) => {
+bot.action(/next_ayah:(\d+):(\d+):(true|false)/, async (ctx) => {
   try {
+    const surah = parseInt(ctx.match[1]);
+    const nextAyah = parseInt(ctx.match[2]);
+    const flag = ctx.match[3] === "true";
+
+    // Обновляем сессию
     const userData = getUserData(ctx.from.id);
-    const nextAyah = Number(userData.text) + 1;
-    const surahInfo = surahs[userData.track - 1];
-
-    if (!surahInfo || nextAyah > surahInfo.ayahs) {
-      return ctx.answerCbQuery("❌ Это последний аят суры");
-    }
-
+    userData.track = surah;
     userData.text = nextAyah;
-    await showTranslation(ctx, userData.track, nextAyah, false);
 
-    analytics.trackEvent(ctx.from.id, "next_ayah_from_translation", {
-      surah: userData.track,
-      ayah: nextAyah,
-    });
-  } catch (error) {
-    logger.error("Error in next_translation_ayah action:", error);
-    ctx.answerCbQuery("❌ Ошибка перехода к следующему аяту.");
-  }
-});
-
-// Обработчик перехода к предыдущему аяту из перевода
-bot.action("prev_translation_ayah", async (ctx) => {
-  try {
-    const userData = getUserData(ctx.from.id);
-    const prevAyah = Number(userData.text) - 1;
-
-    if (prevAyah < 1) {
-      return ctx.answerCbQuery("❌ Это первый аят суры");
-    }
-
-    userData.text = prevAyah;
-    await showTranslation(ctx, userData.track, prevAyah, false);
-
-    analytics.trackEvent(ctx.from.id, "prev_ayah_from_translation", {
-      surah: userData.track,
-      ayah: prevAyah,
-    });
-  } catch (error) {
-    logger.error("Error in prev_translation_ayah action:", error);
-    ctx.answerCbQuery("❌ Ошибка перехода к предыдущему аяту.");
-  }
-});
-
-// Следующий аят
-bot.action(/next_ayah:(true|false)/, async (ctx) => {
-  try {
-    const flag = ctx.match[1] === "true"; // превращаем строку в boolean
-    const userData = getUserData(ctx.from.id);
-    userData.text = Number(userData.text) + 1;
-
-    if (userData.text >= 1) {
-      await showTranslation(ctx, userData.track, userData.text, flag);
+    if (nextAyah >= 1) {
+      await showTranslation(ctx, surah, nextAyah, flag);
       analytics.trackEvent(ctx.from.id, "next_ayah_navigation", {
-        surah: userData.track,
-        ayah: userData.text,
-        // showTranslation: flag
+        surah,
+        ayah: nextAyah,
       });
     } else {
       await ctx.answerCbQuery("❌ Это первый аят суры");
@@ -2389,19 +2818,22 @@ bot.action(/next_ayah:(true|false)/, async (ctx) => {
   }
 });
 
-// Предыдущий аят
-bot.action(/prev_ayah:(true|false)/, async (ctx) => {
+bot.action(/prev_ayah:(\d+):(\d+):(true|false)/, async (ctx) => {
   try {
-    const flag = ctx.match[1] === "true"; // превращаем строку в boolean
-    const userData = getUserData(ctx.from.id);
-    userData.text = Number(userData.text) - 1;
+    const surah = parseInt(ctx.match[1]);
+    const prevAyah = parseInt(ctx.match[2]);
+    const flag = ctx.match[3] === "true";
 
-    if (userData.text >= 1) {
-      await showTranslation(ctx, userData.track, userData.text, flag);
+    // Обновляем сессию
+    const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = prevAyah;
+
+    if (prevAyah >= 1) {
+      await showTranslation(ctx, surah, prevAyah, flag);
       analytics.trackEvent(ctx.from.id, "prev_ayah_navigation", {
-        surah: userData.track,
-        ayah: userData.text,
-        // showTranslation: flag
+        surah,
+        ayah: prevAyah,
       });
     } else {
       await ctx.answerCbQuery("❌ Это первый аят суры");
@@ -2412,21 +2844,75 @@ bot.action(/prev_ayah:(true|false)/, async (ctx) => {
   }
 });
 
-// Показать тафсир
-bot.action(/show_tafsir:(true|false)/, async (ctx) => {
+bot.action(/next_translation_ayah:(\d+):(\d+)/, async (ctx) => {
   try {
-    const flag = ctx.match[1] === "true"; // превращаем строку в boolean
+    const surah = parseInt(ctx.match[1]);
+    const nextAyah = parseInt(ctx.match[2]);
+    const surahInfo = surahs[surah - 1];
+
+    if (!surahInfo || nextAyah > surahInfo.ayahs) {
+      return ctx.answerCbQuery("❌ Это последний аят суры");
+    }
+
+    // Обновляем сессию
     const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = nextAyah.toString();
 
-    const surah = Number(userData.track);
-    const ayah = Number(userData.text);
+    await showTranslation(ctx, surah, nextAyah, false);
 
-    await showTafsir(ctx, flag);
+    analytics.trackEvent(ctx.from.id, "next_ayah_from_translation", {
+      surah,
+      ayah: nextAyah,
+    });
+  } catch (error) {
+    logger.error("Error in next_translation_ayah action:", error);
+    ctx.answerCbQuery("❌ Ошибка перехода к следующему аяту.");
+  }
+});
+
+bot.action(/prev_translation_ayah:(\d+):(\d+)/, async (ctx) => {
+  try {
+    const surah = parseInt(ctx.match[1]);
+    const prevAyah = parseInt(ctx.match[2]);
+
+    if (prevAyah < 1) {
+      return ctx.answerCbQuery("❌ Это первый аят суры");
+    }
+
+    // Обновляем сессию
+    const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = prevAyah.toString();
+
+    await showTranslation(ctx, surah, prevAyah, false);
+
+    analytics.trackEvent(ctx.from.id, "prev_ayah_from_translation", {
+      surah,
+      ayah: prevAyah,
+    });
+  } catch (error) {
+    logger.error("Error in prev_translation_ayah action:", error);
+    ctx.answerCbQuery("❌ Ошибка перехода к предыдущему аяту.");
+  }
+});
+
+bot.action(/show_tafsir:(true|false):(\d+):(\d+)/, async (ctx) => {
+  try {
+    const flag = ctx.match[1] === "true";
+    const surah = parseInt(ctx.match[2]);
+    const ayah = parseInt(ctx.match[3]);
+
+    // Обновляем сессию
+    const userData = getUserData(ctx.from.id);
+    userData.track = surah;
+    userData.text = ayah.toString();
+
+    await showTafsir(ctx, surah, ayah, 0, flag);
 
     analytics.trackEvent(ctx.from.id, "tafsir_viewed", {
       surah,
       ayah,
-      // flag,
     });
   } catch (error) {
     logger.error("Error in show_tafsir action:", error);
@@ -2434,98 +2920,132 @@ bot.action(/show_tafsir:(true|false)/, async (ctx) => {
   }
 });
 
-// Показать тафсир (из перевода)
-bot.action("show_tafsir_reply", async (ctx) => {
-  try {
-    await showTafsir(ctx, true);
-    const userData = getUserData(ctx.from.id);
-    analytics.trackEvent(ctx.from.id, "tafsir_viewed_from_translation", {
-      surah: userData.track,
-      ayah: userData.text,
-    });
-  } catch (error) {
-    logger.error("Error in show_tafsir_reply action:", error);
-    ctx.reply("Ошибка при показе тафсира.");
-  }
-});
-
 // Следующая часть тафсира
-bot.action("tafsir_next", async (ctx) => {
+bot.action(/tafsir_next:(true|false):(\d+):(\d+):(\d+)/, async (ctx) => {
   try {
-    await ctx.answerCbQuery();
+    const flag = ctx.match[1] === "true";
+    const surah = parseInt(ctx.match[2]);
+    const ayah = parseInt(ctx.match[3]);
+    const currentPage = parseInt(ctx.match[4]);
     const userData = getUserData(ctx.from.id);
 
-    if (!userData.tafsirParts || userData.tafsirParts.length === 0) {
-      await ctx.answerCbQuery("❌ Данные тафсира не найдены. Начните заново.");
-      return;
-    }
-
-    if (userData.currentTafsirPage >= userData.tafsirParts.length - 1) {
-      await ctx.answerCbQuery("❌ Это последняя страница тафсира.");
+    if (userData.tafsirParts.length === 0) {
+      await showTafsir(ctx, surah, ayah, currentPage + 1, true);
       return;
     }
 
     await ctx.editMessageReplyMarkup();
+    await ctx.answerCbQuery("Загружаю продолжение тафсира...");
+
+    if (userData.currentTafsirPage >= userData.tafsirParts.length - 1) {
+      await ctx.answerCbQuery("✅ Вы прочитали весь тафсир!");
+      return;
+    }
+
+    if (!userData.currentTafsirPage) userData.currentTafsirPage = currentPage;
+
     userData.currentTafsirPage++;
 
     const hasMore =
       userData.currentTafsirPage < userData.tafsirParts.length - 1;
+    const surahInfo = surahs[userData.track - 1] || {};
+
+    // Формируем текст текущей части
+    const currentPartText = userData.tafsirParts[userData.currentTafsirPage];
+
     const keyboard = hasMore
       ? {
           inline_keyboard: [
-            [{ text: "Показать ещё", callback_data: "tafsir_next" }],
+            [
+              {
+                text: "📖 Продолжение тафсира",
+                callback_data: `tafsir_next:${flag}:${surah}:${ayah}:${userData.currentTafsirPage}`,
+              },
+            ],
           ],
         }
-      : getNavigationKeyboard(userData.track, userData.text, false);
+      : getNavigationKeyboard(parseInt(surah), parseInt(ayah), flag);
 
-    const currentTafsirText = userData.tafsirParts[userData.currentTafsirPage];
-    if (!currentTafsirText) {
-      await ctx.answerCbQuery("❌ Ошибка: текст тафсира не найден.");
-      return;
-    }
+    const message = `
+📘 <b>Тафсир ас-Са'ди</b> (продолжение)
+━━━━━━━━━━━━━━━
+🕋 <b>Сура:</b> ${surah} ${surahInfo.name_ru || ""}
+🔹 <b>Аят:</b> ${ayah}
 
-    const message = `..._${currentTafsirText}_\n\nСтраница: *${
-      userData.currentTafsirPage + 1
-    }/${userData.tafsirParts.length}*`;
+💬 <b>Толкование:</b>
+${currentPartText}${hasMore ? "..." : ""}
+
+📄 <i>Часть ${userData.currentTafsirPage + 1} из ${userData.tafsirParts.length}</i>
+`;
 
     await ctx.reply(message, {
-      parse_mode: "Markdown",
+      parse_mode: "HTML",
       reply_markup: keyboard,
     });
 
     analytics.trackEvent(ctx.from.id, "tafsir_pagination", {
       page: userData.currentTafsirPage + 1,
       total: userData.tafsirParts.length,
+      chars: currentPartText.length,
     });
   } catch (err) {
-    logger.error(err);
+    logger.error("Error in tafsir_next action:", err);
     await ctx.answerCbQuery("❌ Ошибка при загрузке тафсира.");
+  }
+});
+
+bot.action(/change_translate:(\d+):(\d+)/, async (ctx) => {
+  try {
+    const surah = parseInt(ctx.match[1]);
+    const ayah = parseInt(ctx.match[2]);
+    const userData = getUserData(ctx.from.id);
+
+    const currentTranslate = userData.translate || "abu_adel";
+    userData.translate =
+      currentTranslate === "abu_adel" ? "kuliev" : "abu_adel";
+
+    await showTranslation(ctx, surah, ayah, false);
+
+    analytics.trackEvent(ctx.from.id, "translation_changed", {
+      surah,
+      ayah,
+      newTranslate: userData.translate,
+    });
+  } catch (error) {
+    logger.error("Error in change_translate action:", error);
+    ctx.reply("Ошибка при смене перевода.");
   }
 });
 
 // ================ СИСТЕМА ОЧИСТКИ И ПОДДЕРЖКИ ================
 
 // Очистка старых сессий и лимитов
-setInterval(() => {
-  try {
-    // Очищаем старые сессии
-    sessionManager.cleanupOldSessions(CONFIG.sessionTimeout);
+setInterval(
+  () => {
+    try {
+      // Очищаем старые сессии
+      sessionManager.cleanupOldSessions(CONFIG.sessionTimeout);
 
-    logger.info(
-      `Session cleanup: ${sessionManager.getSessionCount()} active sessions`
-    );
-  } catch (error) {
-    logger.error("Error in session cleanup:", error);
-  }
-}, 30 * 60 * 1000);
+      logger.info(
+        `Session cleanup: ${sessionManager.getSessionCount()} active sessions`,
+      );
+    } catch (error) {
+      logger.error("Error in session cleanup:", error);
+    }
+  },
+  30 * 60 * 1000,
+);
 
 // Очистка памяти
 setInterval(() => memoryManager.cleanup(), CONFIG.memoryCleanupInterval);
 
 // Автобэкап каждые 24 часа
-setInterval(() => {
-  backupManager.createBackup();
-}, 24 * 60 * 60 * 1000);
+setInterval(
+  () => {
+    backupManager.createBackup();
+  },
+  24 * 60 * 60 * 1000,
+);
 
 // ================ ИНИЦИАЛИЗАЦИЯ БАЗ ДАННЫХ ================
 async function initializeDatabases() {
@@ -2631,7 +3151,7 @@ async function startBot() {
             `Режимы: ${FEATURE_FLAGS.usersDatabase ? "UsersDB" : ""} ${
               FEATURE_FLAGS.redisLimits ? "RedisLimits" : ""
             }`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "HTML" },
         );
       } catch (error) {
         logger.error("Failed to send startup alert:", error);

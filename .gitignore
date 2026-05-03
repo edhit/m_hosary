@@ -130,7 +130,6 @@ temp
 .yarn/install-state.gz
 .pnp.*
 
-audio_data.json
 
 *.db
 *.db-shm

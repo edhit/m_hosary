@@ -28,7 +28,7 @@ class UsersDatabase {
         this.db.run("PRAGMA journal_mode = WAL", () => {
           this.db.run("PRAGMA synchronous = NORMAL", () => {
             this.db.run("PRAGMA cache_size = 10000", () => {
-              // Создаем таблицу пользователей
+              // Создаем таблицу пользователей с полем translate
               this.db.run(
                 `
                 CREATE TABLE IF NOT EXISTS users (
@@ -38,7 +38,8 @@ class UsersDatabase {
                   username TEXT,
                   last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  requests_count INTEGER DEFAULT 0
+                  requests_count INTEGER DEFAULT 0,
+                  translate TEXT
                 )
               `,
                 (err) => {
@@ -47,6 +48,14 @@ class UsersDatabase {
                     return;
                   }
 
+                  // Добавляем поле translate, если его нет (для совместимости с существующими БД)
+                  this.db.run(
+                    "ALTER TABLE users ADD COLUMN translate TEXT DEFAULT NULL",
+                    () => {
+                      // Игнорируем ошибку, если поле уже существует
+                    }
+                  );
+
                   // Создаем индексы для быстрого поиска
                   this.db.run(
                     "CREATE INDEX IF NOT EXISTS idx_telegram_id ON users(telegram_id)",
@@ -54,8 +63,14 @@ class UsersDatabase {
                       this.db.run(
                         "CREATE INDEX IF NOT EXISTS idx_username ON users(username)",
                         () => {
-                          this.initialized = true;
-                          resolve();
+                          // Создаем индекс для поля translate, если нужно
+                          this.db.run(
+                            "CREATE INDEX IF NOT EXISTS idx_translate ON users(translate)",
+                            () => {
+                              this.initialized = true;
+                              resolve();
+                            }
+                          );
                         }
                       );
                     }
@@ -86,21 +101,22 @@ class UsersDatabase {
   }
 
   // Добавить или обновить пользователя
-  async upsertUser(telegramId, firstName, username) {
+  async upsertUser(telegramId, firstName, username, translate = null) {
     await this.init();
 
     return new Promise((resolve, reject) => {
       this.db.run(
         `
-        INSERT INTO users (telegram_id, first_name, username, last_seen, created_at, requests_count)
-        VALUES (?, ?, ?, CURRENT_TIMESTAMP, COALESCE((SELECT created_at FROM users WHERE telegram_id = ?), CURRENT_TIMESTAMP), COALESCE((SELECT requests_count FROM users WHERE telegram_id = ?), 0))
+        INSERT INTO users (telegram_id, first_name, username, translate, last_seen, created_at, requests_count)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, COALESCE((SELECT created_at FROM users WHERE telegram_id = ?), CURRENT_TIMESTAMP), COALESCE((SELECT requests_count FROM users WHERE telegram_id = ?), 0))
         ON CONFLICT(telegram_id) DO UPDATE SET
           first_name = excluded.first_name,
           username = excluded.username,
+          translate = COALESCE(excluded.translate, translate),
           last_seen = CURRENT_TIMESTAMP,
           requests_count = requests_count + 1
       `,
-        [telegramId, firstName, username, telegramId, telegramId],
+        [telegramId, firstName, username, translate, telegramId, telegramId],
         (err) => {
           if (err) {
             reject(err);
@@ -169,7 +185,79 @@ class UsersDatabase {
     });
   }
 
-  // Получить статистику пользователей
+  // Получить пользователей по значению translate
+  async searchUsersByTranslate(translateValue, limit = 50) {
+    await this.init();
+
+    return new Promise((resolve, reject) => {
+      this.db.all(
+        "SELECT * FROM users WHERE translate LIKE ? ORDER BY last_seen DESC LIMIT ?",
+        [`%${translateValue}%`, limit],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows);
+          }
+        }
+      );
+    });
+  }
+
+  // Получить пользователей с определенным значением translate
+  async getUsersWithTranslate(translateValue = null) {
+    await this.init();
+
+    return new Promise((resolve, reject) => {
+      if (translateValue === null) {
+        // Получить пользователей с любым значением translate
+        this.db.all(
+          "SELECT * FROM users WHERE translate IS NOT NULL ORDER BY last_seen DESC",
+          (err, rows) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(rows);
+            }
+          }
+        );
+      } else {
+        // Получить пользователей с конкретным значением translate
+        this.db.all(
+          "SELECT * FROM users WHERE translate = ? ORDER BY last_seen DESC",
+          [translateValue],
+          (err, rows) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve(rows);
+            }
+          }
+        );
+      }
+    });
+  }
+
+  // Обновить поле translate для пользователя
+  async updateTranslate(telegramId, translate) {
+    await this.init();
+
+    return new Promise((resolve, reject) => {
+      this.db.run(
+        "UPDATE users SET translate = ?, last_seen = CURRENT_TIMESTAMP WHERE telegram_id = ?",
+        [translate, telegramId],
+        function (err) {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(this.changes > 0);
+          }
+        }
+      );
+    });
+  }
+
+  // Получить статистику пользователей (обновленная версия с учетом translate)
   async getStatistics() {
     await this.init();
 
@@ -179,6 +267,8 @@ class UsersDatabase {
         SELECT 
           COUNT(*) as total_users,
           COUNT(CASE WHEN username IS NOT NULL THEN 1 END) as with_username,
+          COUNT(CASE WHEN translate IS NOT NULL THEN 1 END) as with_translate,
+          COUNT(DISTINCT translate) as unique_translates,
           COUNT(CASE WHEN strftime('%s', 'now') - strftime('%s', last_seen) < 86400 THEN 1 END) as active_last_day,
           COUNT(CASE WHEN strftime('%s', 'now') - strftime('%s', last_seen) < 604800 THEN 1 END) as active_last_week,
           COUNT(CASE WHEN requests_count > 0 THEN 1 END) as active_users,
@@ -203,7 +293,35 @@ class UsersDatabase {
 
     return new Promise((resolve, reject) => {
       this.db.all(
-        "SELECT telegram_id, first_name, username, requests_count, last_seen FROM users ORDER BY requests_count DESC LIMIT ?",
+        "SELECT telegram_id, first_name, username, translate, requests_count, last_seen FROM users ORDER BY requests_count DESC LIMIT ?",
+        [limit],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows);
+          }
+        }
+      );
+    });
+  }
+
+  // Получить популярные значения translate
+  async getPopularTranslates(limit = 10) {
+    await this.init();
+
+    return new Promise((resolve, reject) => {
+      this.db.all(
+        `
+        SELECT translate, COUNT(*) as user_count, 
+               SUM(requests_count) as total_requests,
+               MAX(requests_count) as max_requests
+        FROM users 
+        WHERE translate IS NOT NULL
+        GROUP BY translate 
+        ORDER BY user_count DESC, total_requests DESC
+        LIMIT ?
+        `,
         [limit],
         (err, rows) => {
           if (err) {
@@ -275,7 +393,7 @@ class UsersDatabase {
 
     return new Promise((resolve, reject) => {
       this.db.all(
-        "SELECT telegram_id, first_name, username, last_seen, created_at, requests_count FROM users LIMIT ?",
+        "SELECT telegram_id, first_name, username, translate, last_seen, created_at, requests_count FROM users LIMIT ?",
         [limit],
         (err, rows) => {
           if (err) {
@@ -306,6 +424,25 @@ class UsersDatabase {
       );
     });
   }
+
+  // Получить пользователей по значению translate за период
+  async getUsersByTranslateAndPeriod(translateValue, startDate, endDate) {
+    await this.init();
+
+    return new Promise((resolve, reject) => {
+      this.db.all(
+        "SELECT * FROM users WHERE translate = ? AND created_at BETWEEN ? AND ? ORDER BY created_at DESC",
+        [translateValue, startDate, endDate],
+        (err, rows) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(rows);
+          }
+        }
+      );
+    });
+  }
 }
 
 // Создаем синглтон экземпляр
@@ -314,10 +451,19 @@ const dbInstance = new UsersDatabase();
 // Экспортируем функции
 module.exports = {
   // Основные функции
-  upsertUser: (telegramId, firstName, username) =>
-    dbInstance.upsertUser(telegramId, firstName, username),
+  upsertUser: (telegramId, firstName, username, translate) =>
+    dbInstance.upsertUser(telegramId, firstName, username, translate),
   getUser: (telegramId) => dbInstance.getUser(telegramId),
   getAllUsers: (limit, offset) => dbInstance.getAllUsers(limit, offset),
+
+  // Функции для работы с translate
+  updateTranslate: (telegramId, translate) =>
+    dbInstance.updateTranslate(telegramId, translate),
+  searchUsersByTranslate: (translateValue, limit) =>
+    dbInstance.searchUsersByTranslate(translateValue, limit),
+  getUsersWithTranslate: (translateValue) =>
+    dbInstance.getUsersWithTranslate(translateValue),
+  getPopularTranslates: (limit) => dbInstance.getPopularTranslates(limit),
 
   // Поиск и статистика
   searchUsersByName: (name, limit) => dbInstance.searchUsersByName(name, limit),
@@ -326,6 +472,8 @@ module.exports = {
   getUserCount: () => dbInstance.getUserCount(),
   getUsersByPeriod: (startDate, endDate) =>
     dbInstance.getUsersByPeriod(startDate, endDate),
+  getUsersByTranslateAndPeriod: (translateValue, startDate, endDate) =>
+    dbInstance.getUsersByTranslateAndPeriod(translateValue, startDate, endDate),
 
   // Административные функции
   deleteUser: (telegramId) => dbInstance.deleteUser(telegramId),
