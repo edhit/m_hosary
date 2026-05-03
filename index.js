@@ -2443,13 +2443,13 @@ bot.action("send_ayah", accessForAdminsOnly, async (ctx) => {
       ctx.chat.id,
       userData.audioPath,
       {
-        caption: `${userData.message}`,
+        caption: `${userData.message}\n\n🔴 Самия!, посмотри перевод 📕 и тафсир 📘 😊`,
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
             [
               {
-                text: `🔴 Самия!, посмотри перевод 📕 и тафсир 📘 😊`,
+                text: `Перевод/тафсир`,
                 url: link,
               },
             ],
