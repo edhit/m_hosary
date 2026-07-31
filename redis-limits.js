@@ -71,6 +71,25 @@ class RedisLimiter {
     };
   }
 
+  // Лимиты для конкретного типа счётчика.
+  // ВАЖНО: раньше здесь была строка `minute: audioPerHour / 60` — дробный
+  // "примерный" минутный лимит для аудио, который на практике никогда не
+  // проверялся из-за опечатки в имени поля (minute vs perMinute) в
+  // checkAndIncrement. Оба бага компенсировали друг друга случайно: минутный
+  // лимит для аудио фактически не работал. Здесь это сделано явно и
+  // предсказуемо — для аудио минутного лимита нет вообще (Infinity),
+  // ограничения только часовое и дневное.
+  getLimitsForType(type) {
+    if (type === "audio") {
+      return {
+        perMinute: Infinity,
+        perHour: this.config.limits.audioPerHour,
+        perDay: this.config.limits.audioPerDay,
+      };
+    }
+    return this.config.limits;
+  }
+
   // Проверка и увеличение счетчика
   async checkAndIncrement(userId, type = "request") {
     await this.init();
@@ -110,7 +129,7 @@ class RedisLimiter {
             remaining: 0,
             reset: banData.expires,
             message: `🚫 Повторите попытку через: ${formatShortTime(
-              banData.expires - Date.now()
+              banData.expires - Date.now(),
             )} | ${banData.reason}`,
           };
         } else {
@@ -136,22 +155,16 @@ class RedisLimiter {
       const results = await multi.exec();
       const [minuteCount, hourCount, dayCount] = results.map((r) => r[1]);
 
-      // Получаем лимиты для типа
-      const limits =
-        type === "audio"
-          ? {
-              minute: this.config.limits.audioPerHour / 60, // Примерное распределение
-              hour: this.config.limits.audioPerHour,
-              day: this.config.limits.audioPerDay,
-            }
-          : this.config.limits;
+      // Получаем лимиты для типа (perMinute/perHour/perDay — единое имя полей
+      // для request и audio, никаких скрытых расхождений)
+      const limits = this.getLimitsForType(type);
 
       // Проверяем превышение лимитов
       if (minuteCount > limits.perMinute) {
         await this.banUser(
           userId,
           "minute_limit",
-          this.config.banDurations.minute
+          this.config.banDurations.minute,
         );
         return {
           allowed: false,
@@ -226,7 +239,7 @@ class RedisLimiter {
       await this.redisClient.setex(
         `limit:ban:${userId}`,
         Math.ceil(duration / 1000),
-        JSON.stringify(banData)
+        JSON.stringify(banData),
       );
     } catch (error) {
       console.error("Error banning user:", error);
