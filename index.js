@@ -35,6 +35,13 @@ const BACKUP_FOLDER = path.resolve("./backups");
 const ADMIN_USER_ID = process.env.ALLOWED_USER_ID;
 const ALERT_CHAT_ID = process.env.ALERT_CHAT_ID;
 
+// Webhook-режим включается автоматически, если задан WEBHOOK_DOMAIN.
+// Если его нет — бот работает через обычный long polling (как раньше).
+const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN; // например: https://example.com
+const WEBHOOK_PATH = process.env.WEBHOOK_PATH || `/telegraf/${BOT_TOKEN}`;
+const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT) || 8443;
+const WEBHOOK_SECRET_TOKEN = process.env.WEBHOOK_SECRET_TOKEN || undefined;
+
 const CONFIG = {
   tempFolder: TEMP_FOLDER,
   maxFileSize: parseInt(process.env.MAX_FILE_SIZE) || 50 * 1024 * 1024,
@@ -2004,9 +2011,27 @@ process.once("SIGTERM", () => gracefulShutdown("SIGTERM"));
 async function startBot() {
   try {
     await initializeDatabases();
-    await bot.launch();
 
-    logger.info("✅ Бот успешно запущен!");
+    if (WEBHOOK_DOMAIN) {
+      // Webhook-режим: Telegraf сам поднимает HTTP-сервер на WEBHOOK_PORT
+      // и регистрирует адрес в Telegram через setWebhook.
+      await bot.launch({
+        webhook: {
+          domain: WEBHOOK_DOMAIN,
+          path: WEBHOOK_PATH,
+          port: WEBHOOK_PORT,
+          secretToken: WEBHOOK_SECRET_TOKEN,
+        },
+      });
+      logger.info(
+        `✅ Бот успешно запущен в режиме webhook: ${WEBHOOK_DOMAIN}${WEBHOOK_PATH} (порт ${WEBHOOK_PORT})`,
+      );
+    } else {
+      // Обычный long polling — используется, если WEBHOOK_DOMAIN не задан.
+      await bot.launch();
+      logger.info("✅ Бот успешно запущен в режиме long polling!");
+    }
+
     logger.info("System initialized", {
       featureFlags: FEATURE_FLAGS,
       config: CONFIG.userLimits,
@@ -2017,6 +2042,7 @@ async function startBot() {
         .sendMessage(
           ALERT_CHAT_ID,
           "✅ Бот успешно запущен!\n" +
+            `Режим сети: ${WEBHOOK_DOMAIN ? "webhook" : "polling"}\n` +
             `Режимы: ${FEATURE_FLAGS.usersDatabase ? "UsersDB " : ""}${FEATURE_FLAGS.redisLimits ? "RedisLimits" : ""}`,
           { parse_mode: "HTML" },
         )
