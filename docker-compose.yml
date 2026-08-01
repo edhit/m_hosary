@@ -1,24 +1,20 @@
-version: "3.8"
-
 services:
-  quran-bot:
+  bot:
     build: .
-    container_name: m_hosary_bot
     restart: unless-stopped
     env_file:
       - .env
     volumes:
-      # Монтируем директорию для логов
-      - ./logs:/app/logs
-      # Монтируем audio_data.json для сохранения данных
-      - ./audio_data.json:/app/audio_data.json
-      # Монтируем temp для временных файлов
       - ./temp:/app/temp
-    environment:
-      - NODE_ENV=production
-      - TZ=UTC
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - ./database:/app/database   # если тут sqlite-файлы, чтобы не терялись при пересборке
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+
+volumes:
+  redis-data:

@@ -1,30 +1,17 @@
-# Используем официальный образ Node.js
-FROM node:18-alpine
+FROM node:20-slim
 
-# Устанавливаем ffmpeg и необходимые зависимости
-RUN apk add --no-cache \
-    ffmpeg \
-    python3 \
-    make \
-    g++
+# зависимости для сборки sqlite3 (node-gyp)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 
-# Создаём рабочую директорию
 WORKDIR /app
 
-# Копируем package.json и package-lock.json
 COPY package*.json ./
+RUN npm ci --omit=dev
 
-# Устанавливаем зависимости
-RUN npm ci --only=production
-
-# Копируем остальные файлы приложения
 COPY . .
 
-# Создаём директорию для временных файлов
 RUN mkdir -p temp
 
-# Переменные окружения (будут переопределены через .env или docker-compose)
-ENV NODE_ENV=production
-
-# Запускаем бота
 CMD ["node", "index.js"]
