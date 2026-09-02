@@ -130,6 +130,7 @@ temp
 .yarn/install-state.gz
 .pnp.*
 
+cache
 
 # *.db
 # *.db-shm
